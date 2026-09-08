@@ -2,5 +2,11 @@
 line-length = 100
 target-version = "py313"
 
+[tool.ruff.lint]
+# BLE001: на границах «сеть/прокси/процесс» осознанно ловим любые исключения —
+#   мёртвый прокси умирает самыми разными способами, нам важно лишь «не работает».
+# S110: try-except-pass в xray.stop() — добить процесс любой ценой, это сознательно.
+ignore = ["BLE001", "S110"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
