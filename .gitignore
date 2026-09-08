@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Секреты и данные
+.env
+data/
+*.db
+*.sqlite3
+
+# IDE/OS
+.idea/
+.vscode/
+Thumbs.db
