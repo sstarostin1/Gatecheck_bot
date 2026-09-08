@@ -8,6 +8,15 @@
 
 ## Быстрый старт (Windows)
 
+Проще всего — из cmd в папке проекта:
+
+```bat
+run.bat
+```
+
+Скрипт сам создаст `.venv`, поставит зависимости и при первом запуске создаст `.env` из шаблона
+(останется вписать `BOT_TOKEN` и запустить снова). Вручную то же самое:
+
 ```bash
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
@@ -15,7 +24,20 @@ copy .env.example .env   # и вписать BOT_TOKEN от @BotFather
 .venv\Scripts\python main.py
 ```
 
+⚠️ Запускать нужно интерпретатором из `.venv` (или через `run.bat`), а не глобальным `python` —
+иначе получите `ModuleNotFoundError: No module named 'aiogram'`.
+
 Затем в Telegram: `/start` → бот отвечает; любой текст → эхо. Это подтверждает приём/отправку.
+
+## Если что-то не работает
+
+- `ModuleNotFoundError: No module named 'aiogram'` — запущен глобальный python без зависимостей.
+  Используйте `.venv\Scripts\python main.py` или `run.bat`.
+- `Не удалось связаться с api.telegram.org за 20 с` — сеть не достаёт до Telegram: проверьте
+  VPN/прокси (поддержка прокси в конфиге — в плане, VISION.md §9).
+- Бот «запущен», но молчит: убедитесь, что пишете именно этому боту и сначала отправили `/start`;
+  убедитесь, что не запущен второй экземпляр (getUpdates выдаёт 409 Conflict — он был бы в логе).
+
 
 ## Linux (VPS, Debian 13)
 
