@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+chcp 65001 >nul
 
 if not exist ".venv\Scripts\python.exe" (
     echo [Gatecheck] .venv не найден - создаю окружение и ставлю зависимости...
