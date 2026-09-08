@@ -13,14 +13,29 @@
 | RedisQ `redisq.zkillboard.com` | песочница ассистента | ❌ DNS не резолвится | ограничение среды? |
 | RedisQ `curl -v -A "GatecheckBot/0.1" ...` | Win11 автора (cmd) | ❌ `Could not resolve host` (повтор 2026-09-08) | **DNS не резолвится из двух независимых сетей → вероятно, сервис выведен из эксплуатации**; ранее пустой ответ был следствием того же |
 | gatecamp.watch | обе среды | ❌ DNS/недоступен | OQ-9 остаётся открытым |
+| zK API `solarSystemID/30002537/pastSeconds/3600/` (curl, UA GatecheckBot) | песочница ассистента | ✅ HTTP 200 за ~1.3 с, живые киллы (killmail_id 138306789 от 2026-09-08T16:23:15Z) | **Polling zK API работает** (OQ-1/D3) |
+| Доки `https://zkillboard.com/api/` | песочница ассистента | ✅ перечитаны; в навигации сайта плашка **«LIVE UPDATES DISABLED»**, раздел «Live feed & archives» (5 подразделов) | Реалтайм-каналы (RedisQ/стрим) отключены → **D3 = polling zK API** |
+| `api.telegram.org` (curl, таймаут 12 с) | песочница ассистента | ❌ соединение по таймауту (`curl 28`, HTTP 000) | Telegram недоступен напрямую и из песочницы; у автора `get_me()` висел так же → боту нужен **PROXY_URL** (добавлен в v0.2.0) |
+
+## Подтверждено доками zK (2026-09-08)
+
+- Этикет (совпадает с VISION §6): осмысленный User-Agent с URL проекта, `Accept-Encoding: gzip`,
+  кэшировать ответы, trailing slash обязателен, ≤200 киллов на запрос, результат newest-first;
+  модификаторы комбинируются в любом порядке.
+- В билдере запросов есть фильтры **Location** (locationID, пример «Jita IV - Moon 4»),
+  Past seconds, Page, War, Killmail — серверный фильтр по `locationID` существует. Для OQ-2/D4
+  осталось проверить на живых киллах у гейтов, что itemID совпадает с itemID стargates из ESI.
+- Навигация доков содержит раздел «Live feed & archives» (5 подразделов), но живые апдейты
+  помечены **DISABLED** — RedisQ мёртв, реалтайм-канала нет; база — polling zK API (D3).
+- Есть `/cache/bypass/healthcheck/` (Redis/Mongo health) и `/api/version/` — можно использовать
+  для диагностики zK в M2.
 
 ## Следующие шаги спайка
 
-1. **RedisQ замена (актуально):** раз `redisq.zkillboard.com` не резолвится из двух независимых
-   сетей — перечитать `https://zkillboard.com/api/`, раздел **«Live feed & archives»** (5 подразделов):
-   есть ли актуальный реалтайм-канал (стрим/архивы) вместо RedisQ. Если нет — финализировать D3 как
-   polling zK API (архитектура fallback уже поддерживает).
-2. Проверить то же самое с VPS, когда появится.
-3. zK API: взять свежие киллы Amamake: `https://zkillboard.com/api/solarSystemID/30002537/pastSeconds/3600/`
-   и проверить, заполнен ли `zkb.locationID` и соответствует ли он itemID гейта (OQ-2/D4).
+1. ~~RedisQ замена~~ — **закрыто 2026-09-08:** в доках zK «LIVE UPDATES DISABLED», сам хост
+   не резолвится из двух независимых сетей. **D3 финализирован: polling zK API.**
+2. Проверить то же самое с VPS, когда появится (особенно доступность api.telegram.org —
+   если и оттуда нет прямого доступа, использовать PROXY_URL и на VPS).
+3. zK API: проверить `zkb.locationID` у киллов у гейтов против itemID гейтов из ESI (OQ-2/D4) —
+   модификатор `locationID/{id}` в API есть (см. выше).
 4. ESI: собрать граф гейтов региона Heimatar (10000030) в json, оценить размер/время.
