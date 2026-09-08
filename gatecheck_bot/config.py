@@ -23,6 +23,7 @@ class Settings:
 
     bot_token: str
     admin_ids: frozenset[int]
+    proxy_url: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -38,4 +39,5 @@ class Settings:
         admin_ids = frozenset(
             int(part) for part in raw_admin.split(",") if part.strip().isdigit()
         )
-        return cls(bot_token=token, admin_ids=admin_ids)
+        proxy_url = (os.getenv("PROXY_URL") or "").strip() or None
+        return cls(bot_token=token, admin_ids=admin_ids, proxy_url=proxy_url)

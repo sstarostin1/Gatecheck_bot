@@ -33,8 +33,13 @@ copy .env.example .env   # и вписать BOT_TOKEN от @BotFather
 
 - `ModuleNotFoundError: No module named 'aiogram'` — запущен глобальный python без зависимостей.
   Используйте `.venv\Scripts\python main.py` или `run.bat`.
-- `Не удалось связаться с api.telegram.org за 20 с` — сеть не достаёт до Telegram: проверьте
-  VPN/прокси (поддержка прокси в конфиге — в плане, VISION.md §9).
+- Бот «висит» на строке `Проверяю связь с Telegram...`, затем падает с
+  `Не удалось связаться с api.telegram.org за 20 с` — Telegram недоступен из вашей сети
+  напрямую. Впишите в `.env` рабочий прокси: `PROXY_URL=socks5://127.0.0.1:1080`
+  (или `http://...`) и запустите снова. Поддерживаются HTTP- и SOCKS5-прокси
+  (например, локальный порт проксификатора: v2rayN, Clash, Proxifier).
+- `Telegram отклонил токен (401 Unauthorized)` — неверный `BOT_TOKEN` в `.env`
+  (токен выдаёт @BotFather).
 - Бот «запущен», но молчит: убедитесь, что пишете именно этому боту и сначала отправили `/start`;
   убедитесь, что не запущен второй экземпляр (getUpdates выдаёт 409 Conflict — он был бы в логе).
 
@@ -56,6 +61,7 @@ systemd-юнит и автодеплой (GitHub Actions по SSH) — на эт
 |---|---|---|
 | `BOT_TOKEN` | да | токен от [@BotFather](https://t.me/BotFather) |
 | `ADMIN_IDS` | нет | TG ID админов через запятую (свой ID — у @userinfobot) |
+| `PROXY_URL` | нет | прокси для api.telegram.org: `socks5://127.0.0.1:1080` или `http://user:pass@host:port`. Нужен, если Telegram недоступен напрямую из сети |
 
 ## Разработка и тесты
 
