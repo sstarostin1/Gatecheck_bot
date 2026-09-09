@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from aiogram import F, Router
@@ -14,6 +15,7 @@ from aiogram.types import Message
 
 from . import __version__
 from .config import BASE_DIR, Settings
+from .monitoring import RouteMonitor
 from .routing import (
     Graph,
     build_name_index,
@@ -41,15 +43,35 @@ def _get_graph() -> Graph | None:
     return _GRAPH
 
 
-def build_route_reply(graph: Graph, query: str) -> str:
-    """Текст ответа на /route: парсинг аргументов, резолв имён, BFS, формат."""
+_GATES: tuple[dict[str, set[int]], dict[int, str]] | None = None
+
+
+def _get_gates() -> tuple[dict[str, set[int]], dict[int, str]]:
+    """Индексы из data/gates.json: system_id → itemID гейтов и itemID → имя."""
+    global _GATES
+    if _GATES is None:
+        try:
+            doc = json.loads((BASE_DIR / "data" / "gates.json").read_text(encoding="utf-8"))
+            by_system: dict[str, set[int]] = {}
+            names: dict[int, str] = {}
+            for gid, gate in (doc.get("gates") or {}).items():
+                by_system.setdefault(str(gate.get("system_id")), set()).add(int(gid))
+                names[int(gid)] = str(gate.get("name", ""))
+            _GATES = (by_system, names)
+        except (OSError, ValueError):
+            _GATES = ({}, {})
+    return _GATES
+
+
+def build_route_reply(graph: Graph, query: str) -> tuple[str, list[str] | None]:
+    """Текст ответа на /route + список system_id (None, если маршрута нет)."""
     parts = [
         part for part in re.split(r"\s*(?:→|->|;|,)\s*|\s+", query.strip()) if part
     ]
     if not parts:
-        return "Формат: /route Amamake Siseide (разделитель — пробел, → или запятая)."
+        return "Формат: /route Amamake Siseide (разделитель — пробел, → или запятая).", None
     if len(parts) != 2:
-        return "Нужно ровно две системы: /route Amamake Siseide."
+        return "Нужно ровно две системы: /route Amamake Siseide.", None
     index = build_name_index(graph)
     start = resolve_system(parts[0], index)
     goal = resolve_system(parts[1], index)
@@ -59,22 +81,23 @@ def build_route_reply(graph: Graph, query: str) -> str:
     if missing:
         return (
             f"Не нашёл систему: {', '.join(missing)}. "
-            "Проверь написание (граф региона — Heimatar)."
-        )
+            "Проверь написание (граф — весь Новый Эден, без вормхолов)."
+        ), None
     if start == goal:
-        return f"{graph.name_of(start or '')}: ты уже там 🙂"
+        return f"{graph.name_of(start or '')}: ты уже там 🙂", [start]
     route = find_route(graph.adjacency, start or "", goal or "")
     if route is None:
         return (
             f"Маршрут {graph.name_of(start or '')} → {graph.name_of(goal or '')} "
-            "не найден (в пределах графа региона)."
-        )
-    return f"🛰 {format_route(graph, route)}\nПрыжков: {len(route) - 1}"
+            "не найден (нет гейт-связности)."
+        ), None
+    return f"🛰 {format_route(graph, route)}\nПрыжков: {len(route) - 1}", route
 
 
-def build_router(settings: Settings) -> Router:
-    """Собрать роутер базовых хэндлеров."""
+def build_router(settings: Settings, monitor: RouteMonitor | None = None) -> Router:
+    """Собрать роутер базовых хэндлеров (monitor — общий на жизнь процесса)."""
     router = Router(name="basic")
+    monitor = monitor or RouteMonitor()
 
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
@@ -96,8 +119,10 @@ def build_router(settings: Settings) -> Router:
             "Команды:\n"
             "/start — приветствие\n"
             "/help — эта справка\n"
-            "/ping — живость бота (админ)\n\n"
-            f"Версия: v{__version__} (скелет)."
+            "/ping — живость бота (админ)\n"
+            "/route A B — маршрут по гейтам + слежение кемпов (TTL 1 ч)\n"
+            "/route status — статистика · /route stop — выключить\n\n"
+            f"Версия: v{__version__}."
         )
 
     @router.message(Command("ping"))
@@ -107,9 +132,17 @@ def build_router(settings: Settings) -> Router:
         else:
             await message.answer("pong ✅ (режим скелета: без админ-статуса)")
 
-    # /route A B — кратчайший маршрут по классическим гейтам (BFS, M1).
+    # /route A B — маршрут + слежение гейтов (BFS + poller zK, M1/M3).
     @router.message(Command("route"))
     async def cmd_route(message: Message, command: CommandObject) -> None:
+        args = (command.args or "").strip()
+        if args.lower() in {"stop", "стоп"}:
+            await message.answer(monitor.stop(message.chat.id))
+            return
+        if args.lower() in {"status", "статус"}:
+            await message.answer(monitor.status(message.chat.id))
+            return
+
         graph = _get_graph()
         if graph is None:
             await message.answer(
@@ -117,7 +150,24 @@ def build_router(settings: Settings) -> Router:
                 "python scripts/fetch_static.py\n…и попробуй снова."
             )
             return
-        await message.answer(build_route_reply(graph, command.args or ""))
+        text, route = build_route_reply(graph, args)
+        if route is None:
+            await message.answer(text)
+            return
+
+        gate_index, gate_names = _get_gates()
+        if not gate_index:
+            await message.answer(
+                text + "\n\n⚠️ data/gates.json не собран — слежение недоступно, только маршрут."
+            )
+            return
+        monitor.start(message.chat.id, route, graph, gate_index, gate_names)
+        await message.answer(
+            f"{text}\n\n"
+            f"🛡 Слежение гейтов маршрута включено (TTL 60 мин, опрос каждые "
+            f"{int(monitor.poll_interval)} с). Новые киллы на гейтах маршрута — пришлю алерт.\n"
+            "/route status — статистика · /route stop — выключить."
+        )
 
     # Эхо на любой текст — основная проверка приёма/отправки на этом этапе.
     @router.message(F.text)

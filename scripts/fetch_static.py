@@ -22,8 +22,8 @@ import aiohttp
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ESI = "https://esi.evetech.net/latest"
-UA = "GatecheckBot/0.3 (+https://github.com/Anewkey/gatecheck-bot)"
-CONCURRENCY = 8
+UA = "GatecheckBot/0.4 (+https://github.com/Anewkey/gatecheck-bot)"
+CONCURRENCY = 12
 RETRIES = 3
 
 logger = logging.getLogger("fetch_static")
@@ -60,26 +60,37 @@ async def fetch_many(
     return list(await asyncio.gather(*(_one(url) for url in urls)))
 
 
-async def build_graph(region_id: int, out_dir: Path) -> None:
+async def build_graph(region_id: int | None, out_dir: Path) -> None:
+    """Собрать граф: region_id=None — весь Новый Эден, иначе один регион.
+
+    Системы без старгейтов (вормхоулы) в граф не попадают: через гейты они
+    недостижимы и для маршрутов/мониторинга бесполезны.
+    """
     async with aiohttp.ClientSession(
         headers={"User-Agent": UA}, timeout=aiohttp.ClientTimeout(total=30)
     ) as session:
-        logger.info("Регион %s: запрашиваю созвездия...", region_id)
-        region = await get_json(session, f"{ESI}/universe/regions/{region_id}/")
-        if not region:
-            raise SystemExit(f"Регион {region_id} не найден в ESI.")
-        constellation_ids: list[int] = list(region["constellations"])
+        if region_id is None:
+            logger.info("Новый Эден: запрашиваю полный список систем...")
+            all_ids = await get_json(session, f"{ESI}/universe/systems/")
+            if not all_ids:
+                raise SystemExit("ESI не отдал список систем.")
+            system_ids = sorted({int(sid) for sid in all_ids})
+            region_name = "New Eden"
+        else:
+            logger.info("Регион %s: запрашиваю созвездия...", region_id)
+            region = await get_json(session, f"{ESI}/universe/regions/{region_id}/")
+            if not region:
+                raise SystemExit(f"Регион {region_id} не найден в ESI.")
+            region_name = str(region["name"])
+            constellations = await fetch_many(
+                session,
+                [f"{ESI}/universe/constellations/{cid}/" for cid in region["constellations"]],
+            )
+            system_ids = sorted(
+                {sid for c in constellations if c for sid in c.get("systems", [])}
+            )
 
-        logger.info("Созвездий: %d — запрашиваю системы...", len(constellation_ids))
-        constellations = await fetch_many(
-            session,
-            [f"{ESI}/universe/constellations/{cid}/" for cid in constellation_ids],
-        )
-        system_ids: list[int] = sorted(
-            {sid for c in constellations if c for sid in c.get("systems", [])}
-        )
-        logger.info("Систем в регионе: %d — запрашиваю детали...", len(system_ids))
-
+        logger.info("Систем к обработке: %d — запрашиваю детали...", len(system_ids))
         system_payloads = await fetch_many(
             session, [f"{ESI}/universe/systems/{sid}/" for sid in system_ids]
         )
@@ -88,12 +99,28 @@ async def build_graph(region_id: int, out_dir: Path) -> None:
         for sid, payload in zip(system_ids, system_payloads):
             if not payload:
                 continue
+            stargates = payload.get("stargates") or []
+            if not stargates:
+                continue  # вормхоулы/безгейтные — вне графов маршрутов
             systems[str(sid)] = {
                 "name": payload["name"],
                 "constellation_id": payload["constellation_id"],
                 "security_status": round(payload.get("security_status") or 0.0, 4),
             }
-            gate_ids.extend(payload.get("stargates", []))
+            gate_ids.extend(stargates)
+
+        # Регион каждой системы: созвездие → region_id (нужно для статистики/пресетов).
+        constellation_ids = sorted({s["constellation_id"] for s in systems.values()})
+        logger.info("Созвездий к резолву: %d", len(constellation_ids))
+        constellation_payloads = await fetch_many(
+            session, [f"{ESI}/universe/constellations/{cid}/" for cid in constellation_ids]
+        )
+        cid_to_region = {
+            str(c["constellation_id"]): c["region_id"] for c in constellation_payloads if c
+        }
+        for info in systems.values():
+            info["region_id"] = cid_to_region.get(str(info["constellation_id"]))
+        region_ids = sorted({info["region_id"] for info in systems.values() if info["region_id"]})
 
         logger.info("Гейтов: %d — запрашиваю назначения...", len(gate_ids))
         gate_payloads = await fetch_many(
@@ -112,20 +139,24 @@ async def build_graph(region_id: int, out_dir: Path) -> None:
                 "name": payload.get("name", ""),
                 "position": payload.get("position", {}),
             }
-            # Смежность — только внутри набора систем графа (маршруты v1 — в регионе).
             if src in systems and dest in systems:
                 adjacency[src].add(dest)
 
+        # Изолированные узлы (без гейтов в графе) не нужны в смежности.
+        adjacency = {sid: dests for sid, dests in adjacency.items() if dests}
+
     meta = {
-        "version": 1,
+        "version": 2,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "scope": "new_eden" if region_id is None else f"region:{region_id}",
         "region_id": region_id,
-        "region_name": region["name"],
+        "region_name": region_name,
         "esi_base": ESI,
         "counts": {
             "systems": len(systems),
             "gates": len(gates),
             "adjacency_edges": sum(len(v) for v in adjacency.values()),
+            "regions": len(region_ids),
         },
     }
     graph_doc = {
@@ -143,15 +174,15 @@ async def build_graph(region_id: int, out_dir: Path) -> None:
         json.dumps(gates_doc, ensure_ascii=False, indent=1), encoding="utf-8"
     )
     logger.info(
-        "Готово: graph.json (%d систем), gates.json (%d гейтов) → %s",
-        len(systems), len(gates), out_dir,
+        "Готово: graph.json (%d систем, %d регионов), gates.json (%d гейтов) → %s",
+        len(systems), len(region_ids), len(gates), out_dir,
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Сборка графа гейтов региона из ESI.")
+    parser = argparse.ArgumentParser(description="Сборка графа гейтов из ESI.")
     parser.add_argument(
-        "--region", type=int, default=10000030, help="region_id (по умолчанию Heimatar)"
+        "--region", type=int, default=None, help="region_id; по умолчанию — весь Новый Эден"
     )
     parser.add_argument("--out", type=Path, default=BASE_DIR / "data", help="каталог вывода")
     args = parser.parse_args()

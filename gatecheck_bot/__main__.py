@@ -23,6 +23,7 @@ from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 from . import __version__
 from .config import ConfigError, Settings
 from .handlers import build_router
+from .monitoring import RouteMonitor
 from .transport import ProxyPool, mask_proxy_url
 from .transport.checker import TG_PROBE_URL
 from .transport.xray import XrayManager
@@ -92,7 +93,9 @@ async def probe_direct(timeout: float = DIRECT_PROBE_TIMEOUT) -> bool:
         return False
 
 
-async def run_transport(settings: Settings, proxy_url: str | None, label: str) -> None:
+async def run_transport(
+    settings: Settings, proxy_url: str | None, label: str, monitor: RouteMonitor
+) -> None:
     """Один «цикл жизни» сессии: get_me → polling под вотчдогом.
 
     Штатное завершение (stop_polling / Ctrl+C) — просто возврат.
@@ -101,9 +104,10 @@ async def run_transport(settings: Settings, proxy_url: str | None, label: str) -
     """
     bot = Bot(token=settings.bot_token, session=build_session(proxy_url))
     dp = Dispatcher()
-    dp.include_router(build_router(settings))
+    dp.include_router(build_router(settings, monitor))
     polling_task: asyncio.Task | None = None
     watchdog_task: asyncio.Task | None = None
+    monitor_task: asyncio.Task | None = None
 
     async def watchdog() -> None:
         failures = 0
@@ -139,8 +143,10 @@ async def run_transport(settings: Settings, proxy_url: str | None, label: str) -
         )
         polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
         watchdog_task = asyncio.create_task(watchdog())
+        monitor_task = asyncio.create_task(monitor.run_forever(bot))
         done, _pending = await asyncio.wait(
-            {polling_task, watchdog_task}, return_when=asyncio.FIRST_COMPLETED
+            {polling_task, watchdog_task, monitor_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for task in done:
             exc = task.exception()
@@ -148,10 +154,14 @@ async def run_transport(settings: Settings, proxy_url: str | None, label: str) -
                 raise exc
         return  # polling завершился штатно
     finally:
-        for task in (polling_task, watchdog_task):
+        for task in (polling_task, watchdog_task, monitor_task):
             if task is not None:
                 task.cancel()
-        pending = [task for task in (polling_task, watchdog_task) if task is not None]
+        pending = [
+            task
+            for task in (polling_task, watchdog_task, monitor_task)
+            if task is not None
+        ]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         await bot.session.close()
@@ -160,6 +170,7 @@ async def run_transport(settings: Settings, proxy_url: str | None, label: str) -
 async def run(settings: Settings) -> None:
     """Выбрать живой транспорт и крутить polling; при сбоях — ротация (см. модуль)."""
     xray = XrayManager()
+    monitor = RouteMonitor()  # живёт через ротации транспортов: слежки не теряются
     pool: ProxyPool | None = None
     if settings.proxy_autopool:
         pool = ProxyPool(
@@ -176,7 +187,7 @@ async def run(settings: Settings) -> None:
             static_label = mask_proxy_url(settings.proxy_url)
             logger.info("Транспорт №1: статичный прокси %s.", static_label)
             try:
-                await run_transport(settings, settings.proxy_url, static_label)
+                await run_transport(settings, settings.proxy_url, static_label, monitor)
                 return
             except NetworkDead:
                 logger.error("Статичный прокси не отвечает — пробую следующие транспорты.")
@@ -184,7 +195,7 @@ async def run(settings: Settings) -> None:
         if await probe_direct():
             logger.info("Транспорт №2: прямое соединение.")
             try:
-                await run_transport(settings, None, "напрямую")
+                await run_transport(settings, None, "напрямую", monitor)
                 return
             except NetworkDead:
                 logger.error("Прямое соединение потеряно — включаю автономный прокси-пул.")
@@ -212,13 +223,14 @@ async def run(settings: Settings) -> None:
                     logger.warning("Пул исчерпан — обновляю источники.")
                     break
                 try:
-                    await run_transport(settings, proxy.connector_url, proxy.label())
+                    await run_transport(settings, proxy.connector_url, proxy.label(), monitor)
                     return
                 except NetworkDead:
                     logger.warning("Прокси %s перестал работать — беру следующий.", proxy.label())
             await asyncio.sleep(5.0)
     finally:
         await xray.stop()
+        await monitor.aclose()
 
 
 def main() -> None:

@@ -71,21 +71,32 @@ def test_load_graph_valid(tmp_path: Path) -> None:
 def test_build_route_reply_happy(graph: Graph) -> None:
     from gatecheck_bot.handlers import build_route_reply
 
-    reply = build_route_reply(graph, "Alpha Delta")
-    assert "Alpha → Beta → Gamma → Delta" in reply
-    assert "Прыжков: 3" in reply
+    text, route = build_route_reply(graph, "Alpha Delta")
+    assert "Alpha → Beta → Gamma → Delta" in text
+    assert route == ["1", "2", "3", "4"]
+    assert "Прыжков: 3" in text
 
 
 def test_build_route_reply_errors(graph: Graph) -> None:
     from gatecheck_bot.handlers import build_route_reply
 
-    assert "Формат" in build_route_reply(graph, "")
-    assert "ровно две" in build_route_reply(graph, "Alpha Beta Gamma")
-    assert "Не нашёл" in build_route_reply(graph, "Alpha Nope")
-    assert "уже там" in build_route_reply(graph, "Alpha Alpha")
+    text, route = build_route_reply(graph, "")
+    assert "Формат" in text and route is None
+    text, route = build_route_reply(graph, "Alpha Beta Gamma")
+    assert "ровно две" in text and route is None
+    text, route = build_route_reply(graph, "Alpha Nope")
+    assert "Не нашёл" in text and route is None
+
+
+def test_build_route_reply_same_system(graph: Graph) -> None:
+    from gatecheck_bot.handlers import build_route_reply
+
+    text, route = build_route_reply(graph, "Alpha Alpha")
+    assert "уже там" in text and route == ["1"]
 
 
 def test_build_route_reply_arrow_separator(graph: Graph) -> None:
     from gatecheck_bot.handlers import build_route_reply
 
-    assert "Прыжков: 1" in build_route_reply(graph, "Alpha → Beta")
+    text, route = build_route_reply(graph, "Alpha → Beta")
+    assert "Прыжков: 1" in text and route == ["1", "2"]
