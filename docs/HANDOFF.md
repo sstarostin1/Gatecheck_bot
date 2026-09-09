@@ -65,6 +65,13 @@ VPS Debian 13, автодеплой GitHub Actions по SSH (D8). Данные: 
   `python -m gatecheck_bot.proxycheck`. Ruff 0.16: BLE001/S110 в ignore (осознанные широкие catch
   на сетевых границах). Тесты 18/18 (`tests/test_transport.py`). **Проверено живьём:** из сети
   с блокировкой Telegram бот добыл пул и запустился через socks5 из него (@Eve_gatechecker_bot).
+- **v0.4.0 (2026-09-09): модуль M1 «граф+маршрут», M0 закрыт.** `scripts/fetch_static.py`
+  (ESI → `data/graph.json` + `data/gates.json`; Heimatar — 83 системы / 238 гейта / 220 рёбер,
+  конкурентность 8, gzip, UA). Модуль `gatecheck_bot/routing.py` (резолв имён + BFS) и команда
+  `/route A B` в aiogram-хендлерах (граф грузится лениво; собрать можно на живом боту).
+  **OQ-2 закрыт**: zK `locationID` = itemID гейтов (проверено на 194 киллах Amamake) → D4 без
+  геометрии, OQ-3 снят. Тесты 28/28 (`tests/test_routing.py`), ruff чист. Живые маршруты:
+  Amamake→Siseide 1 прыжок; Amamake→Rens 3 (Osoggur, Abudban).
 
 ## 4. Открытые проблемы на момент передачи
 
@@ -81,15 +88,16 @@ VPS Debian 13, автодеплой GitHub Actions по SSH (D8). Данные: 
 
 ## 5. Дорожная карта (по приоритету)
 
-- **M0 (добить спайк):** проверить `zkb.locationID` на живых данных — запрос
-  `https://zkillboard.com/api/solarSystemID/30002537/pastSeconds/3600/`; сравнить locationID
-  с itemID гейтов из ESI (`/universe/systems/30002537/` → `stargates`). Вывод записать (OQ-2/D4).
-- **M1:** скрипт `scripts/fetch_static.py`: ESI → граф гейтов + имена + координаты → `data/graph.json`,
-  `data/gates.json` (с версией/датой); команда `/route A B` (BFS, только классические гейты) без
-  мониторинга; systemd-юнит для Debian 13; GitHub Actions: ruff+pytest, деплой-джоба по SSH (D8).
+- **M0 (спайк): ЗАКРЫТ 2026-09-09** — OQ-2 подтверждён на живых данных: `zkb.locationID` =
+  itemID гейтов → D4 без геометрии (OQ-3 снят). RedisQ мёртв (LIVE UPDATES DISABLED) →
+  D3 = polling zK API, сам API отвечает 200 с живыми киллами. Детали — spike-01.md.
+- **M1: ЧАСТИЧНО ГОТОВО (v0.4.0)** — `scripts/fetch_static.py` (граф+гейты Heimatar) и
+  `/route A B` (BFS) работают; **осталось:** systemd-юнит для Debian 13 и GitHub Actions
+  (ruff+pytest, деплой-джоба по SSH, D8).
 - **M2:** фоновый мониторинг зоны: poller zK API (зона ~5–8 req/мин — в рамках этикета), dedup по
   killID, `kill_cache` в SQLite, пресет «Hed+соседи», алерты D5 (всплеск ≥3/10 мин; ≥8/час;
   droppable ISK — OQ-11: поля zkb vs `quantity_dropped` × цены ESI/Fuzzwork), cooldown.
+  Фундамент готов: киллы на воротах = `zkb.locationID` ∈ itemID гейтов системы (OQ-2 закрыт).
 - **M3:** активный режим маршрута: TTL 1 ч (D6), опрос 40–60 с, алерт ≥1 нового килла на воротах,
   группировка ship+pod (OQ-4), `/route stop`.
 - **M4:** fair-use лимиты на чат (OQ-8), `/settings`, `/ping` со статистикой, README с деплоем,

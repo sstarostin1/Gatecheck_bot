@@ -3,8 +3,9 @@
 Телеграм-бот мониторинга киллов на гейтах EVE Online: пуш-уведомления о всплесках активности
 в зоне фарма и усиленный мониторинг маршрутов. Идеология и план — в [docs/VISION.md](docs/VISION.md).
 
-**Текущий статус: скелет (v0.1.0).** Бот запускается, получает сообщения и отвечает:
-`/start`, `/help`, `/ping` и эхо на любой текст/медиа. Мониторинг — следующие итерации.
+**Текущий статус (v0.4.0):** бот работает при блокировках (автономный прокси-пул), отвечает на
+`/start`, `/help`, `/ping`, `/route Amamake Siseide` (маршрут по гейтам Heimatar) и эхо.
+Мониторинг киллов — следующий этап (M2/M3, план в [docs/VISION.md](docs/VISION.md)).
 
 ## Быстрый старт (Windows)
 
@@ -15,19 +16,27 @@ run.bat
 ```
 
 Скрипт сам создаст `.venv`, поставит зависимости и при первом запуске создаст `.env` из шаблона
-(останется вписать `BOT_TOKEN` и запустить снова). Вручную то же самое:
+(останется вписать `BOT_TOKEN` и запустить снова). Затем один раз собери граф гейтов (для `/route`):
+
+```bat
+.venv\Scripts\python scripts\fetch_static.py
+```
+
+Вручную то же самое:
 
 ```bash
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 copy .env.example .env   # и вписать BOT_TOKEN от @BotFather
+.venv\Scripts\python scripts\fetch_static.py
 .venv\Scripts\python main.py
 ```
 
 ⚠️ Запускать нужно интерпретатором из `.venv` (или через `run.bat`), а не глобальным `python` —
 иначе получите `ModuleNotFoundError: No module named 'aiogram'`.
 
-Затем в Telegram: `/start` → бот отвечает; любой текст → эхо. Это подтверждает приём/отправку.
+Затем в Telegram: `/start` → приветствие; `/route Amamake Siseide` → маршрут (1 прыжок);
+`/route Amamake Rens` → 3 прыжка; любой текст → эхо. Это подтверждает приём/отправку.
 
 ## Если что-то не работает
 
