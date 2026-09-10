@@ -24,6 +24,7 @@ from .routing import (
     load_graph,
     resolve_system,
 )
+from .zone import ZoneMonitor
 
 
 def is_admin(settings: Settings, message: Message) -> bool:
@@ -94,10 +95,15 @@ def build_route_reply(graph: Graph, query: str) -> tuple[str, list[str] | None]:
     return f"🛰 {format_route(graph, route)}\nПрыжков: {len(route) - 1}", route
 
 
-def build_router(settings: Settings, monitor: RouteMonitor | None = None) -> Router:
-    """Собрать роутер базовых хэндлеров (monitor — общий на жизнь процесса)."""
+def build_router(
+    settings: Settings,
+    monitor: RouteMonitor | None = None,
+    zone_monitor: ZoneMonitor | None = None,
+) -> Router:
+    """Собрать роутер базовых хэндлеров (мониторы — общие на жизнь процесса)."""
     router = Router(name="basic")
     monitor = monitor or RouteMonitor()
+    zone_monitor = zone_monitor or ZoneMonitor()
 
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
@@ -121,7 +127,8 @@ def build_router(settings: Settings, monitor: RouteMonitor | None = None) -> Rou
             "/help — эта справка\n"
             "/ping — живость бота (админ)\n"
             "/route A B — маршрут по гейтам + слежение кемпов (TTL 1 ч)\n"
-            "/route status — статистика · /route stop — выключить\n\n"
+            "/route status — статистика · /route stop — выключить\n"
+            "/zone on|status|off — мониторинг зоны фарма «Hed + соседи»\n\n"
             f"Версия: v{__version__}."
         )
 
@@ -168,6 +175,44 @@ def build_router(settings: Settings, monitor: RouteMonitor | None = None) -> Rou
             f"{int(monitor.poll_interval)} с). Новые киллы на гейтах маршрута — пришлю алерт.\n"
             "/route status — статистика · /route stop — выключить."
         )
+
+    # /zone on|off|status — фоновый мониторинг зоны фарма (M2, пресет «Hed + соседи»).
+    @router.message(Command("zone"))
+    async def cmd_zone(message: Message, command: CommandObject) -> None:
+        args = (command.args or "").strip().lower()
+        if args in {"on", "вкл", "включить"}:
+            graph = _get_graph()
+            if graph is None:
+                await message.answer(
+                    "Граф гейтов ещё не собран. Один раз на хосте выполни:\n"
+                    "python scripts/fetch_static.py\n…и попробуй снова."
+                )
+                return
+            gate_index, gate_names = _get_gates()
+            if not gate_index:
+                await message.answer("data/gates.json не собран — зона недоступна.")
+                return
+            watch = zone_monitor.start(message.chat.id, graph, gate_index, gate_names)
+            zone_names = ", ".join(watch.names[sid] for sid in watch.systems)
+            await message.answer(
+                f"🔥 Зона включена: «Hed + соседи», {len(watch.systems)} систем, "
+                f"опрос каждые {int(zone_monitor.poll_interval)} с.\n"
+                f"Состав: {zone_names}\n\n"
+                "Алерты по гейтам зоны: всплеск ≥3 килла/10 мин, накопление ≥8/час, "
+                "дорогой droppable ISK.\n"
+                "/zone status — состояние · /zone off — выключить."
+            )
+        elif args in {"off", "выкл", "выключить"}:
+            await message.answer(zone_monitor.stop(message.chat.id))
+        elif args in {"status", "статус"}:
+            await message.answer(zone_monitor.status(message.chat.id))
+        else:
+            await message.answer(
+                "Формат:\n"
+                "/zone on — включить зону «Hed + соседи»\n"
+                "/zone status — состояние зоны\n"
+                "/zone off — выключить"
+            )
 
     # Эхо на любой текст — основная проверка приёма/отправки на этом этапе.
     @router.message(F.text)

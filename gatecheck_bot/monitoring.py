@@ -93,6 +93,31 @@ class RouteWatch:
 Fetcher = Callable[[aiohttp.ClientSession, str, int], Awaitable[list[dict] | None]]
 
 
+async def resolve_ship_names(
+    session: aiohttp.ClientSession, type_ids: set[int], cache: dict[int, str]
+) -> dict[int, str]:
+    """Имена кораблей через ESI /universe/names; кэш навсегда (id типов стабильны)."""
+    result: dict[int, str] = {}
+    missing = [tid for tid in type_ids if tid not in cache]
+    if missing:
+        try:
+            async with session.post(
+                f"{ESI}/universe/names/",
+                json=missing[:1000],
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    for item in await resp.json():
+                        cache[int(item["id"])] = str(item.get("name", ""))
+        except Exception as exc:
+            logger.debug("ESI names: %s: %s", type(exc).__name__, exc)
+    for tid in type_ids:
+        name = cache.get(tid)
+        if name:
+            result[tid] = name
+    return result
+
+
 class RouteMonitor:
     """Реестр активных слежек + фоновый poller с алертами о гейт-кампах."""
 
@@ -235,27 +260,9 @@ class RouteMonitor:
 
     async def _resolve_ship_names(self, type_ids: set[int]) -> dict[int, str]:
         """Имена кораблей через ESI /universe/names; кэш навсегда (id стабильны)."""
-        result: dict[int, str] = {}
-        missing = [tid for tid in type_ids if tid not in self._ship_names]
-        if missing:
-            try:
-                if self._session is None or self._session.closed:
-                    self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
-                async with self._session.post(
-                    f"{ESI}/universe/names/",
-                    json=missing[:1000],
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status == 200:
-                        for item in await resp.json():
-                            self._ship_names[int(item["id"])] = str(item.get("name", ""))
-            except Exception as exc:
-                logger.debug("ESI names: %s: %s", type(exc).__name__, exc)
-        for tid in type_ids:
-            name = self._ship_names.get(tid)
-            if name:
-                result[tid] = name
-        return result
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
+        return await resolve_ship_names(self._session, type_ids, self._ship_names)
 
     def _format_alert(
         self,
