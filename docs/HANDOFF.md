@@ -72,6 +72,14 @@ VPS Debian 13, автодеплой GitHub Actions по SSH (D8). Данные: 
   **OQ-2 закрыт**: zK `locationID` = itemID гейтов (проверено на 194 киллах Amamake) → D4 без
   геометрии, OQ-3 снят. Тесты 28/28 (`tests/test_routing.py`), ruff чист. Живые маршруты:
   Amamake→Siseide 1 прыжок; Amamake→Rens 3 (Osoggur, Abudban).
+- **v0.6.0 (2026-09-09): модуль M2 «мониторинг зоны», OQ-11 закрыт.** `gatecheck_bot/zone.py`:
+  **/zone on|off|status**, пресет «Hed+соседи» по графу (13 систем), тик 240 с, D5-триггеры
+  (всплеск ≥3/10 мин, накопление ≥8/час, droppable ISK ≥100M/10 мин — готовое поле zK
+  `totalDroppableValue`), cooldown 15 мин на систему, алерты со ссылкой на zKillboard
+  и кораблями (общий хелпер resolve_ship_names вынесен в monitoring.py). Живой тик проверен
+  на реальных zK-данных. Тесты 44/44 (`tests/test_zone.py`). **Осталось в M2:** персистентность
+  подписок и kill-истории в SQLite (сейчас in-memory, рестарт сбрасывает), /settings для порогов,
+  пресеты зон из файла (D7).
 - **v0.5.0 (2026-09-09): граф Нового Эдена + слежение маршрута (M3-прототип).**
   `fetch_static.py` v2 — по умолчанию весь Новый Эден (5268 систем / 68 регионов / 13978 гейтов;
   --region — один регион). Команда `/route A B` теперь включает **слежение**: монитор
@@ -104,10 +112,11 @@ VPS Debian 13, автодеплой GitHub Actions по SSH (D8). Данные: 
 - **M1: ЧАСТИЧНО ГОТОВО (v0.4.0)** — `scripts/fetch_static.py` (граф+гейты Heimatar) и
   `/route A B` (BFS) работают; **осталось:** systemd-юнит для Debian 13 и GitHub Actions
   (ruff+pytest, деплой-джоба по SSH, D8).
-- **M2:** фоновый мониторинг зоны: poller zK API (зона ~5–8 req/мин — в рамках этикета), dedup по
-  killID, `kill_cache` в SQLite, пресет «Hed+соседи», алерты D5 (всплеск ≥3/10 мин; ≥8/час;
-  droppable ISK — OQ-11: поля zkb vs `quantity_dropped` × цены ESI/Fuzzwork), cooldown.
-  Фундамент готов: киллы на воротах = `zkb.locationID` ∈ itemID гейтов системы (OQ-2 закрыт).
+- **M2: ЯДРО ГОТОВО (v0.6.0)** — `/zone on|off|status`, пресет «Hed+соседи» (13 систем по графу),
+  опрос 4 мин (5-8 req/мин — в рамках этикета), D5-триггеры (всплеск ≥3/10 мин, накопление ≥8/час,
+  droppable ISK ≥100M/10 мин — `zkb.totalDroppableValue`, OQ-11 закрыт), cooldown 15 мин.
+  **Осталось:** kill_cache и подписки в SQLite (сейчас in-memory), /settings для порогов,
+  пресеты зон из файла (D7).
 - **M3: ПРОТОТИП ГОТОВ (v0.5.0)** — слежение маршрута работает: `/route A B` включает монитор
   (TTL 1 ч, опрос zK каждые 50 с, алерты новых киллов на гейтах с ISK и кораблями), `/route status`
   (статистика + прогрессия ▲▼), `/route stop`. **Осталось:** персистентность слежек в SQLite между
