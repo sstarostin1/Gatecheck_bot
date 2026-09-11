@@ -127,10 +127,13 @@ SQLite (WAL, миграция 001): zone_subs, route_watches (TTL), kill_events 
 alerts_log (cooldown), users(settings_json). restore() обоих мониторов: рестарт не теряет
 подписки, seen-базу и cooldown.
 
-**Блок 2 — Релиз-инжиниринг (D8, G4) — ЧАСТИЧНО:**
-готово: systemd-юнит (deploy/gatecheck.service), инструкция (deploy/README.md), VPS получен.
-осталось: GitHub Actions (ruff+pytest, автодеплой по SSH), публикация репо на GitHub
-(UA/доки ссылаются на несуществующий URL — починить при публикации), первый живой деплой.
+**Блок 2 — Релиз-инжиниринг (D8, G4) — В ОСНОВЕ ГОТОВО (2026-09-09, деплой выполнен):**
+репо опубликован (https://github.com/sstarostin1/Gatecheck_bot, origin/main = HEAD), CI добавлен
+(.github/workflows/ci.yml: ruff+pytest), **ручной деплой на VPS выполнен**: Debian 13, юзер
+gatecheck, /opt/gatecheck (git clone с GitHub), venv, .env+статика перенесены, systemd active —
+**бот в проде** (транспорт «напрямую», polling; Memory 171M из 400M; ошибок в журнале нет).
+осталось: деплой-джоба GH Actions по SSH (нужны Secrets: VPS_HOST/VPS_USER/VPS_SSH_KEY),
+автообновление статики на VPS раз в сутки (пока ручной fetch_static / scp), HTML parse mode.
 
 **Блок 3 — Гарантии публичного бота — ГОТОВО (v0.7.0):**
 лимиты 1 зона + 1 маршрут на чат; /settings для порогов D5 в границах SETTING_BOUNDS;

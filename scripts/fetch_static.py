@@ -22,7 +22,7 @@ import aiohttp
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ESI = "https://esi.evetech.net/latest"
-UA = "GatecheckBot/0.4 (+https://github.com/Anewkey/gatecheck-bot)"
+UA = "GatecheckBot/0.7 (+https://github.com/sstarostin1/Gatecheck_bot)"
 CONCURRENCY = 12
 RETRIES = 3
 

@@ -17,7 +17,7 @@ from .proxy_types import DEFAULT_SOURCES, ProxyInfo, parse_proxy_line
 
 logger = logging.getLogger("gatecheck_bot.transport")
 
-_UA = "GatecheckBot/0.3 (proxy pool discovery)"
+_UA = "GatecheckBot/0.7 (+https://github.com/sstarostin1/Gatecheck_bot)"
 
 __all__ = ["DEFAULT_SOURCES", "ProxyInfo", "extract_candidates", "fetch_text"]
 

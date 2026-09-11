@@ -26,7 +26,7 @@ logger = logging.getLogger("gatecheck_bot.monitoring")
 
 ZK_BASE = "https://zkillboard.com/api"
 ESI = "https://esi.evetech.net/latest"
-ZK_UA = "GatecheckBot/0.4 (+https://github.com/Anewkey/gatecheck-bot)"
+ZK_UA = "GatecheckBot/0.7 (+https://github.com/sstarostin1/Gatecheck_bot)"
 
 POLL_INTERVAL = 50.0    # период опроса маршрута, с (D-план: 40–60 с)
 TTL_SECONDS = 3600.0    # время жизни слежки, с (D6: 1 час)
