@@ -22,8 +22,9 @@ from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from . import __version__
 from .config import ConfigError, Settings
-from .handlers import build_router
+from .handlers import _get_gates, _get_graph, build_router
 from .monitoring import RouteMonitor
+from .storage import Storage
 from .transport import ProxyPool, mask_proxy_url
 from .transport.checker import TG_PROBE_URL
 from .transport.xray import XrayManager
@@ -177,8 +178,13 @@ async def run_transport(
 async def run(settings: Settings) -> None:
     """Выбрать живой транспорт и крутить polling; при сбоях — ротация (см. модуль)."""
     xray = XrayManager()
-    monitor = RouteMonitor()  # живёт через ротации транспортов: слежки не теряются
-    zone_monitor = ZoneMonitor()
+    storage: Storage | None = None
+    try:
+        storage = Storage(settings.db_path)
+    except Exception as exc:
+        logger.error("SQLite недоступен (%s) — работаем в памяти, рестарт потеряет слежки.", exc)
+    monitor = RouteMonitor(storage=storage)  # живёт через ротации транспортов
+    zone_monitor = ZoneMonitor(storage=storage)
     pool: ProxyPool | None = None
     if settings.proxy_autopool:
         pool = ProxyPool(
@@ -191,6 +197,18 @@ async def run(settings: Settings) -> None:
         )
 
     try:
+        # Восстановить слежки из SQLite до подключения (рестарт-персистентность).
+        graph = _get_graph()
+        gate_index, gate_names = _get_gates()
+        if graph is not None and storage is not None:
+            zones_restored = zone_monitor.restore(graph, gate_index, gate_names)
+            routes_restored = monitor.restore(graph, gate_index, gate_names)
+            if zones_restored or routes_restored:
+                logger.info(
+                    "Восстановлено слежек после рестарта: зон %d, маршрутов %d.",
+                    zones_restored, routes_restored,
+                )
+
         if settings.proxy_url:
             static_label = mask_proxy_url(settings.proxy_url)
             logger.info("Транспорт №1: статичный прокси %s.", static_label)
@@ -244,6 +262,8 @@ async def run(settings: Settings) -> None:
         await xray.stop()
         await monitor.aclose()
         await zone_monitor.aclose()
+        if storage is not None:
+            storage.close()
 
 
 def main() -> None:

@@ -53,6 +53,7 @@ class Settings:
     proxy_pool_size: int = 20              # сколько рабочих прокси держать
     proxy_refresh_sec: int = 1800          # резерв: период фоновой проверки (M2+)
     proxy_cache_path: str = "data/proxy_cache.json"
+    db_path: str = "data/gatecheck.sqlite3"  # SQLite (D2): подписки/маршруты/kill-кэш
 
     @classmethod
     def from_env(cls, require_token: bool = True) -> Settings:
@@ -88,4 +89,5 @@ class Settings:
             proxy_pool_size=_get_int("PROXY_POOL_SIZE", 20),
             proxy_refresh_sec=_get_int("PROXY_REFRESH_SEC", 1800),
             proxy_cache_path=(os.getenv("PROXY_CACHE") or "data/proxy_cache.json").strip(),
+            db_path=(os.getenv("DB_PATH") or "data/gatecheck.sqlite3").strip(),
         )

@@ -1,6 +1,7 @@
 """Тесты монитора маршрутов: фильтр гейтов, дедуп, алерты, TTL, статусы."""
 
 import asyncio
+import time
 
 from gatecheck_bot.monitoring import (
     RouteMonitor,
@@ -20,10 +21,11 @@ def make_graph() -> Graph:
     return Graph(systems=systems, adjacency=adjacency, meta={})
 
 
-def kill(kid: int, location: int, value: float = 1e6, ship: int = 670) -> dict:
+def kill(kid: int, location: int, value: float = 1e6, ship: int = 587) -> dict:
     return {
         "killmail_id": kid,
-        "zkb": {"locationID": location, "totalValue": value},
+        "killmail_time": "2026-09-09T12:00:00Z",
+        "zkb": {"locationID": location, "totalValue": value, "totalDroppableValue": value},
         "victim": {"ship_type_id": ship},
     }
 
@@ -100,9 +102,71 @@ def test_second_tick_alerts_only_new_gate_kills() -> None:
     assert chat_id == 100
     assert "Гейт-камп: Beta" in text
     assert "Stargate (Gamma): +1 новых" in text
-    assert "ISK на гейтах за час: 501.00M" in text  # 5e8 (новый) + 1e6 (старый)
+    assert "Droppable ISK на гейтах за час: 501.00M" in text  # 5e8 (новый) + 1e6 (старый)
     assert "Rifter" in text
     assert 3 not in monitor.watches[100].seen  # станция в дедуп не попала
+
+
+def test_route_alert_groups_ship_and_pod_and_links_zkb() -> None:
+    polls: dict[str, list[dict] | None] = {"1": [kill(1, 500)], "2": [], "3": []}
+    monitor = make_monitor(polls)
+    monitor.start(100, ["1", "2", "3"], make_graph(), GATES, GATE_NAMES)
+    bot = FakeBot()
+    asyncio.run(monitor._tick_all(bot))
+    polls["1"] = [
+        kill(1, 500),
+        kill(10, 500, value=7e8, ship=670),  # капсула
+        kill(11, 500, value=8e8, ship=587),
+    ]
+    asyncio.run(monitor._tick_all(bot))
+    assert len(bot.sent) == 1
+    text = bot.sent[0][1]
+    assert "Stargate (Out): +1 новых, +1 капсул(ы), за час 3" in text  # OQ-4; 1+1+1=3 за час
+    assert "Droppable ISK на гейтах за час: 1.50B" in text  # 7e8 + 8e8
+    assert "zKillboard: https://zkillboard.com/system/1/" in text
+
+
+def test_fetch_hour_counts_alive_and_failed() -> None:
+    polls: dict[str, list[dict] | None] = {
+        "1": [kill(1, 500), kill(2, 500), kill(3, 60004816)],  # 2 из 3 на гейтах
+        "2": None,  # сбой fetcher'а
+        "3": [],
+    }
+    monitor = make_monitor(polls)
+    counts = asyncio.run(monitor.fetch_hour_counts(["1", "2", "3"], GATES))
+    assert counts["1"] == 2
+    assert counts["2"] is None
+    assert counts["3"] == 0
+
+
+def test_route_watch_persisted_and_restored(tmp_path) -> None:
+    from gatecheck_bot.storage import Storage
+
+    storage = Storage(tmp_path / "p.sqlite3")
+    polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
+
+    async def fetcher(session, sid, window):
+        return polls.get(sid)
+
+    async def fake_ships(type_ids):
+        return {}
+
+    first = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher)
+    first._resolve_ship_names = fake_ships  # type: ignore[method-assign]
+    first.start(9, ["1", "2", "3"], make_graph(), GATES, GATE_NAMES)
+    storage.add_kill_event(
+        "2", 77, gate_id=501, kill_ts=time.time() - 600, droppable=1e6, ship_type_id=587
+    )
+
+    second = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher)
+    second._resolve_ship_names = fake_ships  # type: ignore[method-assign]
+    assert second.restore(make_graph(), GATES, GATE_NAMES) == 1
+    watch = second.watches[9]
+    assert watch.route == ["1", "2", "3"]
+    assert watch.baselined is True  # база была до рестарта
+    assert 77 in watch.seen  # база из kill-кэша: после рестарта дублей не будет
+    asyncio.run(second.aclose())
+    storage.close()
 
 
 def test_status_progression_and_ttl_expiry() -> None:

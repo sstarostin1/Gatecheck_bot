@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -24,7 +25,10 @@ from .routing import (
     load_graph,
     resolve_system,
 )
-from .zone import ZoneMonitor
+from .storage import Storage
+from .zone import SETTING_BOUNDS, ZoneMonitor, clamp_setting, parse_setting_value
+
+PROCESS_STARTED_MONOTONIC = time.monotonic()
 
 
 def is_admin(settings: Settings, message: Message) -> bool:
@@ -99,11 +103,19 @@ def build_router(
     settings: Settings,
     monitor: RouteMonitor | None = None,
     zone_monitor: ZoneMonitor | None = None,
+    storage: Storage | None = None,
 ) -> Router:
-    """Собрать роутер базовых хэндлеров (мониторы — общие на жизнь процесса)."""
+    """Собрать роутер базовых хэндлеров (мониторы/хранилище — общие на процесс)."""
     router = Router(name="basic")
     monitor = monitor or RouteMonitor()
     zone_monitor = zone_monitor or ZoneMonitor()
+
+    def user_thresholds(chat_id: int) -> dict | None:
+        """Пользовательские пороги D5 из Storage (None — дефолты)."""
+        if storage is None:
+            return None
+        user_settings = storage.get_settings(chat_id)
+        return user_settings or None
 
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
@@ -128,16 +140,82 @@ def build_router(
             "/ping — живость бота (админ)\n"
             "/route A B — маршрут по гейтам + слежение кемпов (TTL 1 ч)\n"
             "/route status — статистика · /route stop — выключить\n"
-            "/zone on|status|off — мониторинг зоны фарма «Hed + соседи»\n\n"
+            "/zone on|status|off — мониторинг зоны фарма «Hed + соседи»\n"
+            "/settings — пороги алертов зоны (границы показываются)\n\n"
             f"Версия: v{__version__}."
         )
 
     @router.message(Command("ping"))
     async def cmd_ping(message: Message) -> None:
-        if is_admin(settings, message):
-            await message.answer(f"pong ✅ (v{__version__})")
+        if not is_admin(settings, message):
+            await message.answer(f"pong ✅ (v{__version__}; админ-статус не выдан)")
+            return
+        graph = _get_graph()
+        if graph is not None:
+            counts_meta = graph.meta.get("counts", {})
+            statics = (
+                f"{counts_meta.get('systems')} систем / {counts_meta.get('gates')} гейтов, "
+                f"от {str(graph.meta.get('generated_at', '?'))[:10]}"
+            )
         else:
-            await message.answer("pong ✅ (режим скелета: без админ-статуса)")
+            statics = "граф не собран"
+        uptime_min = int((time.monotonic() - PROCESS_STARTED_MONOTONIC) / 60)
+        requests = monitor.stat_requests + zone_monitor.stat_requests
+        errors = monitor.stat_errors + zone_monitor.stat_errors
+        await message.answer(
+            f"pong ✅ v{__version__}\n"
+            f"Аптайм: {uptime_min} мин\n"
+            f"Статика: {statics}\n"
+            f"Слежки: зон {len(zone_monitor.watches)}, маршрутов {len(monitor.watches)}\n"
+            f"zK: запросов {requests}, ошибок {errors}"
+        )
+
+    # /settings — пользовательские пороги D5 в разрешённых границах (OQ-8).
+    @router.message(Command("settings"))
+    async def cmd_settings(message: Message, command: CommandObject) -> None:
+        args = (command.args or "").strip()
+        if not args:
+            current = storage.get_settings(message.chat.id) if storage else {}
+            lines = ["Пороги зоны (D5), границы в скобках:"]
+            for key, (low, high) in SETTING_BOUNDS.items():
+                value = current.get(key)
+                value_txt = "—" if value is None else str(value)
+                lines.append(f"• {key}: {value_txt} ({low:g}…{high:g})")
+            lines.append(
+                "Изменить: /settings burst 4 · /settings isk 200M · /settings cooldown 20m"
+            )
+            lines.append("Действуют со следующего /zone on. Сброс всех: /settings reset")
+            await message.answer("\n".join(lines))
+            return
+        if args.lower() == "reset":
+            if storage is not None:
+                storage.set_settings(message.chat.id, {})
+            await message.answer("Пороги сброшены к дефолтам — действуют со следующего /zone on.")
+            return
+        parts = args.split()
+        if len(parts) != 2 or parts[0] not in SETTING_BOUNDS:
+            await message.answer(
+                "Формат: /settings <порог> <значение>. Пороги: "
+                + ", ".join(SETTING_BOUNDS)
+                + ". Пример: /settings isk 200M"
+            )
+            return
+        key, raw_value = parts[0], parts[1]
+        value = parse_setting_value(key, raw_value)
+        if value is None:
+            await message.answer(f"Не разобрал значение «{raw_value}». Пример: /settings isk 200M")
+            return
+        if storage is None:
+            await message.answer("Хранилище недоступно — пороги не сохраняются.")
+            return
+        clamped = clamp_setting(key, value)
+        user_settings = storage.get_settings(message.chat.id)
+        user_settings[key] = clamped
+        storage.set_settings(message.chat.id, user_settings)
+        note = "" if value == clamped else f" (ограничено границей: {clamped:g})"
+        await message.answer(
+            f"✅ {key} = {clamped:g}{note}\nДействует со следующего /zone on."
+        )
 
     # /route A B — маршрут + слежение гейтов (BFS + poller zK, M1/M3).
     @router.message(Command("route"))
@@ -168,12 +246,28 @@ def build_router(
                 text + "\n\n⚠️ data/gates.json не собран — слежение недоступно, только маршрут."
             )
             return
+
+        # §5, шаг 2: в ответе — ТЕКУЩИЕ счётчики киллов на гейтах каждой системы.
+        counts = await monitor.fetch_hour_counts(route, gate_index)
+        stat_lines: list[str] = []
+        clean = 0
+        for sid in route:
+            count = counts.get(sid)
+            name = graph.name_of(sid)
+            if count is None:
+                stat_lines.append(f"• {name}: данные недоступны")
+            elif count > 0:
+                stat_lines.append(f"• {name}: {count} килл(ов) на гейтах за час")
+            else:
+                clean += 1
+        if clean:
+            stat_lines.append(f"✅ Чисто: {clean} систем")
+
         monitor.start(message.chat.id, route, graph, gate_index, gate_names)
         await message.answer(
-            f"{text}\n\n"
-            f"🛡 Слежение гейтов маршрута включено (TTL 60 мин, опрос каждые "
-            f"{int(monitor.poll_interval)} с). Новые киллы на гейтах маршрута — пришлю алерт.\n"
-            "/route status — статистика · /route stop — выключить."
+            f"{text}\n\nСейчас на гейтах маршрута:\n" + "\n".join(stat_lines)
+            + f"\n\n🛡 Слежение включено (TTL 60 мин, опрос каждые {int(monitor.poll_interval)} с)."
+            "\n/route status — статистика · /route stop — выключить."
         )
 
     # /zone on|off|status — фоновый мониторинг зоны фарма (M2, пресет «Hed + соседи»).
@@ -192,7 +286,10 @@ def build_router(
             if not gate_index:
                 await message.answer("data/gates.json не собран — зона недоступна.")
                 return
-            watch = zone_monitor.start(message.chat.id, graph, gate_index, gate_names)
+            watch = zone_monitor.start(
+                message.chat.id, graph, gate_index, gate_names,
+                thresholds=user_thresholds(message.chat.id),
+            )
             zone_names = ", ".join(watch.names[sid] for sid in watch.systems)
             await message.answer(
                 f"🔥 Зона включена: «Hed + соседи», {len(watch.systems)} систем, "

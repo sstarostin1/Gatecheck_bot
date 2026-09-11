@@ -16,8 +16,11 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import aiohttp
+
+from .storage import Storage
 
 logger = logging.getLogger("gatecheck_bot.monitoring")
 
@@ -30,6 +33,7 @@ TTL_SECONDS = 3600.0    # время жизни слежки, с (D6: 1 час)
 WINDOW_SECONDS = 3600.0  # окно статистики zK, с
 REQUEST_GAP = 0.3       # пауза между запросами к zK (этикет)
 SEEN_CAP = 20000        # потолок памяти дедупликации на слежку
+CAPSULE_ID = 670        # капсула — для группировки ship+pod (OQ-4)
 
 
 def format_isk(isk: float) -> str:
@@ -48,18 +52,41 @@ def format_isk(isk: float) -> str:
 async def fetch_system_kills(
     session: aiohttp.ClientSession, system_id: str, past_seconds: int
 ) -> list[dict] | None:
-    """Киллы системы из zK за окно; сбой/не-200 → None (система пропускается)."""
+    """Киллы системы из zK за окно; 429/403 — один ретрай с паузой; сбой → None."""
     url = f"{ZK_BASE}/solarSystemID/{system_id}/pastSeconds/{past_seconds}/"
+    for attempt in range(2):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status in {429, 403} and attempt == 0:
+                    logger.warning("zK %s: HTTP %s — пауза и ретрай", system_id, resp.status)
+                    await asyncio.sleep(2.0)
+                    continue
+                if resp.status != 200:
+                    logger.warning("zK %s: HTTP %s", system_id, resp.status)
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+        except Exception as exc:
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+                continue
+            logger.warning("zK %s: %s: %s", system_id, type(exc).__name__, exc)
+            return None
+    return None
+
+
+def kill_epoch(kill: dict) -> float:
+    """killmail_time (ISO UTC) → epoch секунд; окна киллов считаются по времени килла."""
+    raw = str(kill.get("killmail_time", ""))
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                logger.warning("zK %s: HTTP %s", system_id, resp.status)
-                return None
-            data = await resp.json()
-            return data if isinstance(data, list) else None
-    except Exception as exc:
-        logger.warning("zK %s: %s: %s", system_id, type(exc).__name__, exc)
-        return None
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _victim_ship(kill: dict) -> int:
+    """ship_type_id жертвы (0, если не определён)."""
+    return int(kill.get("victim", {}).get("ship_type_id") or 0)
 
 
 def filter_gate_kills(kills: list[dict], gate_ids: set[int]) -> list[dict]:
@@ -127,6 +154,7 @@ class RouteMonitor:
         ttl_seconds: float = TTL_SECONDS,
         window_seconds: int = WINDOW_SECONDS,
         request_gap: float = REQUEST_GAP,
+        storage: Storage | None = None,
         fetcher: Fetcher | None = None,
     ) -> None:
         self.poll_interval = poll_interval
@@ -134,6 +162,9 @@ class RouteMonitor:
         self.window_seconds = window_seconds
         self.request_gap = request_gap
         self.fetcher = fetcher or fetch_system_kills
+        self.storage = storage  # SQLite-персистентность (рестарт переживает)
+        self.stat_requests = 0
+        self.stat_errors = 0
         self.watches: dict[int, RouteWatch] = {}
         self._session: aiohttp.ClientSession | None = None
         self._ship_names: dict[int, str] = {}
@@ -159,11 +190,15 @@ class RouteMonitor:
             expires_at=time.monotonic() + self.ttl_seconds,
         )
         self.watches[chat_id] = watch
+        if self.storage is not None:
+            self.storage.upsert_route(chat_id, watch.route, time.time(), time.time() + self.ttl_seconds)
         return watch
 
     def stop(self, chat_id: int) -> str:
         if self.watches.pop(chat_id, None) is None:
             return "Слежение не было включено. /route A B — включить."
+        if self.storage is not None:
+            self.storage.del_route(chat_id)
         return "🛡 Слежение остановлено."
 
     async def aclose(self) -> None:
@@ -213,6 +248,8 @@ class RouteMonitor:
         expired = [cid for cid, w in self.watches.items() if now >= w.expires_at]
         for chat_id in expired:
             self.watches.pop(chat_id, None)
+            if self.storage is not None:
+                self.storage.del_route(chat_id)
             try:
                 await bot.send_message(
                     chat_id,
@@ -221,6 +258,9 @@ class RouteMonitor:
                 )
             except Exception as exc:
                 logger.warning("Не отправил TTL-сообщение в %s: %s", chat_id, exc)
+        if self.storage is not None:
+            # Чистка kill-кэша старше 7 суток (VISION §8).
+            self.storage.prune_kill_events(time.time() - 7 * 86400)
         for watch in list(self.watches.values()):
             await self._tick_watch(watch, bot)
 
@@ -229,9 +269,10 @@ class RouteMonitor:
             self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
         watch.prev_counts = dict(watch.counts)
         alerts: list[str] = []
+        alerted_sids: list[str] = []
         total = len(watch.route)
         for pos, sid in enumerate(watch.route, start=1):
-            kills = await self.fetcher(self._session, sid, self.window_seconds) or []
+            kills = await self._fetch_kills(sid, self.window_seconds) or []
             gate_kills = filter_gate_kills(kills, watch.gates_by_system.get(sid, set()))
             watch.counts[sid] = len(gate_kills)
             watch.isk[sid] = sum(
@@ -241,14 +282,23 @@ class RouteMonitor:
             watch.seen.update(int(k["killmail_id"]) for k in gate_kills)
             if len(watch.seen) > SEEN_CAP:
                 watch.seen = set(sorted(watch.seen)[-SEEN_CAP // 2 :])
+            if self.storage is not None:
+                for k in new_kills:
+                    self.storage.add_kill_event(
+                        sid,
+                        int(k["killmail_id"]),
+                        int(k.get("zkb", {}).get("locationID") or 0),
+                        kill_epoch(k),
+                        float(k.get("zkb", {}).get("totalDroppableValue") or 0.0),
+                        _victim_ship(k) or None,
+                    )
             if watch.baselined and new_kills:
-                type_ids = {
-                    int(k.get("victim", {}).get("ship_type_id") or 0) for k in new_kills
-                } - {0}
+                type_ids = {_victim_ship(k) for k in new_kills} - {0, CAPSULE_ID}
                 ship_names = await self._resolve_ship_names(type_ids)
                 alerts.append(
                     self._format_alert(watch, sid, pos, total, new_kills, gate_kills, ship_names)
                 )
+                alerted_sids.append(sid)
             if self.request_gap:
                 await asyncio.sleep(self.request_gap)
         watch.baselined = True
@@ -257,6 +307,9 @@ class RouteMonitor:
                 await bot.send_message(watch.chat_id, "\n\n".join(alerts))
             except Exception as exc:
                 logger.warning("Не отправил алерт в %s: %s", watch.chat_id, exc)
+            if self.storage is not None:
+                for sid in alerted_sids:
+                    self.storage.log_alert(watch.chat_id, "route", sid, time.time())
 
     async def _resolve_ship_names(self, type_ids: set[int]) -> dict[int, str]:
         """Имена кораблей через ESI /universe/names; кэш навсегда (id стабильны)."""
@@ -284,9 +337,74 @@ class RouteMonitor:
         lines = [f"🚨 Гейт-камп: {watch.names[sid]} (точка {pos}/{total} маршрута)"]
         for gid, kills in by_gate.items():
             gate_label = watch.gate_names.get(gid) or f"гейт {gid}"
-            lines.append(f"• {gate_label}: +{len(kills)} новых, за час {hour_by_gate.get(gid, 0)}")
-        isk = sum(float(k.get("zkb", {}).get("totalValue") or 0) for k in gate_kills)
-        lines.append(f"ISK на гейтах за час: {format_isk(isk)}")
+            ships = [k for k in kills if _victim_ship(k) != CAPSULE_ID]
+            pods = len(kills) - len(ships)  # группировка ship+pod (OQ-4)
+            parts = [f"+{len(ships)} новых"]
+            if pods:
+                parts.append(f"+{pods} капсул(ы)")
+            lines.append(
+                f"• {gate_label}: {', '.join(parts)}, за час {hour_by_gate.get(gid, 0)}"
+            )
+        isk = sum(
+            float(k.get("zkb", {}).get("totalDroppableValue") or 0) for k in gate_kills
+        )
+        lines.append(f"Droppable ISK на гейтах за час: {format_isk(isk)}")
         if ship_names:
             lines.append("Корабли: " + ", ".join(sorted(ship_names.values())))
+        lines.append(f"zKillboard: https://zkillboard.com/system/{sid}/")
         return "\n".join(lines)
+
+    async def _fetch_kills(self, sid: str, window: int) -> list[dict] | None:
+        """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping)."""
+        self.stat_requests += 1
+        kills = await self.fetcher(self._session, sid, window)
+        if kills is None:
+            self.stat_errors += 1
+        return kills
+
+    async def fetch_hour_counts(
+        self, route: list[str], gate_index: dict[str, set[int]]
+    ) -> dict[str, int | None]:
+        """Живые счётчики киллов на гейтах систем маршрута за час (§5, шаг 2)."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
+        semaphore = asyncio.Semaphore(8)
+
+        async def _one(sid: str) -> tuple[str, int | None]:
+            async with semaphore:
+                kills = await self._fetch_kills(sid, 3600)
+            if kills is None:
+                return sid, None
+            return sid, len(filter_gate_kills(kills, gate_index.get(sid, set())))
+
+        results = await asyncio.gather(*(_one(sid) for sid in set(route)))
+        return dict(results)
+
+    def restore(self, graph, gate_index: dict[str, set[int]], gate_names) -> int:
+        """Восстановить слежки маршрутов из Storage (после рестарта). Возвращает число."""
+        if self.storage is None:
+            return 0
+        now_epoch = time.time()
+        restored = 0
+        for item in self.storage.active_routes(now_epoch):
+            route = item["route"]
+            gates_by_system = {sid: set(gate_index.get(sid, ())) for sid in route}
+            watch = RouteWatch(
+                chat_id=item["chat_id"],
+                route=route,
+                names={sid: graph.name_of(sid) for sid in route},
+                gates_by_system=gates_by_system,
+                gate_names=dict(gate_names),
+                started_at=time.monotonic() - (now_epoch - item["started_epoch"]),
+                expires_at=time.monotonic() + (item["expires_epoch"] - now_epoch),
+                baselined=True,  # база уже зафиксирована до рестарта
+            )
+            for event in self.storage.kill_events_since(now_epoch - self.window_seconds):
+                if (
+                    event["system_id"] in gates_by_system
+                    and event["gate_id"] in gates_by_system[event["system_id"]]
+                ):
+                    watch.seen.add(event["kill_id"])
+            self.watches[watch.chat_id] = watch
+            restored += 1
+        return restored
