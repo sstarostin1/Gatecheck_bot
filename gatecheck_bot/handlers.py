@@ -302,7 +302,25 @@ def build_router(
         elif args in {"off", "выкл", "выключить"}:
             await message.answer(zone_monitor.stop(message.chat.id))
         elif args in {"status", "статус"}:
-            await message.answer(zone_monitor.status(message.chat.id))
+            if message.chat.id in zone_monitor.watches:
+                await message.answer(await zone_monitor.status(message.chat.id))
+                return
+            graph = _get_graph()
+            if graph is None:
+                await message.answer(
+                    "Зона не включена. /zone on — включить (граф ещё не собран)."
+                )
+                return
+            gate_index, gate_names = _get_gates()
+            if not gate_index:
+                await message.answer(
+                    "Зона не включена. /zone on — включить (gates.json не собран)."
+                )
+                return
+            # Без подписки — разовый живой опрос зоны прямо сейчас.
+            await message.answer(
+                await zone_monitor.live_snapshot(graph, gate_index, gate_names)
+            )
         else:
             await message.answer(
                 "Формат:\n"

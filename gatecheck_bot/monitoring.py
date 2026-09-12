@@ -351,7 +351,6 @@ class RouteMonitor:
         lines.append(f"Droppable ISK на гейтах за час: {format_isk(isk)}")
         if ship_names:
             lines.append("Корабли: " + ", ".join(sorted(ship_names.values())))
-        lines.append(f"zKillboard: https://zkillboard.com/system/{sid}/")
         return "\n".join(lines)
 
     async def _fetch_kills(self, sid: str, window: int) -> list[dict] | None:

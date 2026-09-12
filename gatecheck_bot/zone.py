@@ -5,8 +5,16 @@
 Тик раз в ~4 мин (G1: 3–5 мин): для каждой системы — киллы zK за час, фильтр
 «на гейте» = zkb.locationID ∈ itemID гейтов (D4). Скользящие окна считаются по
 killmail_time киллов: всплеск ≥3/10 мин, накопление ≥8/час, droppable ISK
-(zkb.totalDroppableValue — OQ-11) за 10 мин выше порога. Cooldown 15 мин на
-систему, чтобы не спамить. Алерт — система, счётчики, ссылка на zKillboard.
+(zkb.totalDroppableValue — OQ-11) за 10 мин выше порога (дефолт 0.5B).
+
+Формат алерта (по фидбеку с прода): каждый алерт само-достаточен — всегда
+пер-гейт разбивка «за 10 мин · за час» по каждой системе зоны; заголовок
+«Всплеск активности в системе/системах:»; без «Причины» и ссылок на zKillboard
+(превью zK спамило). Анти-спам: повторный алерт только при НОВЫХ киллах с
+момента прошлого алерта + cooldown 15 мин на систему.
+
+/zone status: с подпиской — пер-гейт детализация из сохранённых событий;
+без подписки — разовый живой опрос зоны прямо сейчас (live_snapshot).
 
 zK/ESI ходят напрямую (без прокси бота) — оба доступны из заблокированных сетей.
 """
@@ -43,7 +51,7 @@ WINDOW_BURST = 600.0    # окно всплеска, с (D5: 10 минут)
 WINDOW_HOUR = 3600.0    # окно накопления, с (D5: 1 час)
 BURST_THRESHOLD = 3     # D5: ≥3 килла на гейтах системы за 10 минут
 HOUR_THRESHOLD = 8      # D5: ≥8 киллов на гейтах системы за час
-ISK_BURST = 100e6       # D5: droppable ISK за 10 мин выше порога (настраиваемый, дефолт 100M)
+ISK_BURST = 5e8         # D5: droppable ISK за 10 мин выше порога (настраиваемый, дефолт 0.5B)
 COOLDOWN = 900.0        # подавление повторных алертов системы, с (15 мин)
 
 # Констелляция Hed (VISION §6.1): Amamake, Vard, Siseide, Lantorn, Dal, Auga.
@@ -65,10 +73,60 @@ def _kill_droppable(kill: dict) -> float:
     return float(kill.get("zkb", {}).get("totalDroppableValue") or 0.0)
 
 
+def _format_activity_block(
+    name: str,
+    events: list[dict],
+    now_epoch: float,
+    gate_names: dict[int, str],
+    ship_names: dict[int, str],
+) -> str:
+    """Блок «система → гейты»: что на каждом гейте за 10 мин и за час — само-достаточно.
+
+    events — киллы «на гейтах» (уже отфильтрованы по D4) за последний час,
+    каждое событие: {ts, kid, droppable, ship, gate}.
+    """
+    burst_n = hour_n = 0
+    isk_10m = 0.0
+    gates: dict[int, list[int]] = {}
+    ships: set[int] = set()
+    for event in events:
+        in_burst = event["ts"] >= now_epoch - WINDOW_BURST
+        in_hour = event["ts"] >= now_epoch - WINDOW_HOUR
+        if not in_hour:
+            continue
+        hour_n += 1
+        if in_burst:
+            burst_n += 1
+            isk_10m += event["droppable"]
+            if event["ship"] and event["ship"] != CAPSULE_ID:
+                ships.add(event["ship"])
+        gate_stats = gates.setdefault(event["gate"], [0, 0])
+        gate_stats[1] += 1
+        if in_burst:
+            gate_stats[0] += 1
+    lines = [
+        (
+            f"{name} — за 10 мин: {burst_n} килл(ов) на гейтах, "
+            f"droppable ISK за 10 мин: {format_isk(isk_10m)} · за час: {hour_n}"
+        )
+    ]
+    for gid, (gate_burst, gate_hour) in sorted(
+        gates.items(), key=lambda item: (-item[1][1], -item[1][0])
+    ):
+        gate_label = gate_names.get(gid) or f"гейт {gid}"
+        lines.append(f"• {gate_label}: за 10 мин {gate_burst} · за час {gate_hour}")
+    if ships:
+        named = ", ".join(
+            sorted(ship_names.get(tid, f"type {tid}") for tid in ships)
+        )
+        lines.append(f"Корабли (за 10 мин): {named}")
+    return "\n".join(lines)
+
+
 SETTING_BOUNDS: dict[str, tuple[float, float]] = {
     "burst": (2, 10),          # всплеск: киллов на гейтах за 10 мин
     "hour": (4, 20),           # накопление: киллов за час
-    "isk_burst": (10e6, 1e9),  # droppable ISK за 10 мин
+    "isk_burst": (10e6, 5e9),  # droppable ISK за 10 мин
     "cooldown": (300, 3600),   # пауза между алертами системы, с
 }
 
@@ -111,6 +169,8 @@ class ZoneWatch:
     events: dict[str, deque] = field(default_factory=dict)  # system_id -> deque[dict]
     seen: set[int] = field(default_factory=set)  # killmail_id
     last_alert: dict[str, float] = field(default_factory=dict)  # system_id -> monotonic
+    last_alert_ts: dict[str, float] = field(default_factory=dict)  # system_id -> kill epoch:
+    # ts последнего килла, уже попавшего в алерт; «новые» = ts больше этого значения
 
     def __post_init__(self) -> None:
         for sid in self.systems:
@@ -172,6 +232,12 @@ class ZoneMonitor:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
+    async def _resolve_ship_names(self, type_ids: set[int]) -> dict[int, str]:
+        """Имена кораблей через ESI /universe/names; кэш навсегда (id стабильны)."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
+        return await resolve_ship_names(self._session, type_ids, self._ship_names)
+
     async def _fetch_kills(self, sid: str, window: int) -> list[dict] | None:
         """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping)."""
         self.stat_requests += 1
@@ -225,7 +291,8 @@ class ZoneMonitor:
             self.storage.del_zone_sub(chat_id)
         return "🛡 Зона выключена."
 
-    def status(self, chat_id: int) -> str:
+    async def status(self, chat_id: int) -> str:
+        """Состояние зоны из сохранённых событий: пер-гейт детализация по активным системам."""
         watch = self.watches.get(chat_id)
         if watch is None:
             return (
@@ -241,13 +308,66 @@ class ZoneMonitor:
         ]
         clean = 0
         for sid in watch.systems:
-            burst, hour, _isk = watch.counts(sid, now_epoch)
-            if burst == 0 and hour == 0:
+            events = [
+                e
+                for e in watch.events.get(sid, ())
+                if e["ts"] >= now_epoch - WINDOW_HOUR
+            ]
+            if not events:
                 clean += 1
                 continue
-            lines.append(f"⚠️ {watch.names[sid]}: за 10 мин {burst}, за час {hour}")
+            ship_ids = {e["ship"] for e in events if e["ship"]} - {CAPSULE_ID}
+            ship_names = await self._resolve_ship_names(ship_ids)
+            lines.append(
+                _format_activity_block(
+                    watch.names[sid], events, now_epoch, watch.gate_names, ship_names
+                )
+            )
         lines.append(f"✅ Чисто: {clean} систем")
         lines.append("Выключить: /zone off")
+        return "\n".join(lines)
+
+    async def live_snapshot(self, graph, gate_index: dict[str, set[int]], gate_names) -> str:
+        """Разовый опрос зоны без подписки: активность на гейтах «прямо сейчас»."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
+        systems = build_zone_preset(graph, self.hed_ids)
+        now_epoch = datetime.now(UTC).timestamp()
+        lines = [
+            f"Активность зоны «Hed + соседи» (разовый опрос, {len(systems)} систем):"
+        ]
+        clean = 0
+        for sid in systems:
+            kills = await self._fetch_kills(sid, int(WINDOW_HOUR)) or []
+            gate_kills = filter_gate_kills(kills, gate_index.get(sid, set()))
+            events = [
+                {
+                    "ts": kill_epoch(kill),
+                    "kid": int(kill["killmail_id"]),
+                    "droppable": _kill_droppable(kill),
+                    "ship": int(kill.get("victim", {}).get("ship_type_id") or 0),
+                    "gate": int(kill.get("zkb", {}).get("locationID") or 0),
+                }
+                for kill in gate_kills
+            ]
+            hour_events = [e for e in events if e["ts"] >= now_epoch - WINDOW_HOUR]
+            if not hour_events:
+                clean += 1
+                continue
+            ship_ids = {e["ship"] for e in hour_events if e["ship"]} - {CAPSULE_ID}
+            ship_names = await resolve_ship_names(self._session, ship_ids, self._ship_names)
+            lines.append(
+                _format_activity_block(
+                    graph.name_of(sid), hour_events, now_epoch, gate_names, ship_names
+                )
+            )
+            if self.request_gap:
+                await asyncio.sleep(self.request_gap)
+        if clean == len(systems):
+            lines.append("✅ На гейтах зоны чисто")
+        elif clean:
+            lines.append(f"✅ Чисто: {clean} систем")
+        lines.append("Постоянное слежение: /zone on")
         return "\n".join(lines)
 
     # --- фоновый цикл -----------------------------------------------------
@@ -271,19 +391,35 @@ class ZoneMonitor:
         now_epoch = datetime.now(UTC).timestamp()
         if self.storage is not None:
             self.storage.prune_kill_events(now_epoch - 7 * 86400)
-        alerts: list[str] = []
+        blocks: list[str] = []
+        alerted_sids: list[str] = []
         for sid in watch.systems:
-            alert = await self._tick_system(watch, sid, now_epoch)
-            if alert is not None:
-                alerts.append(alert)
-        if alerts:
+            block = await self._tick_system(watch, sid, now_epoch)
+            if block is not None:
+                blocks.append(block)
+                alerted_sids.append(sid)
+        if blocks:
+            header = (
+                "Всплеск активности в системе:"
+                if len(blocks) == 1
+                else "Всплеск активности в системах:"
+            )
             try:
-                await bot.send_message(watch.chat_id, "\n\n".join(alerts))
+                await bot.send_message(watch.chat_id, header + "\n\n" + "\n\n".join(blocks))
             except Exception as exc:
                 logger.warning("Не отправил алерт зоны в %s: %s", watch.chat_id, exc)
+            if self.storage is not None:
+                for sid in alerted_sids:
+                    self.storage.log_alert(watch.chat_id, "zone", sid, time.time())
 
-    async def _tick_system(self, watch: ZoneWatch, sid: str, now_epoch: float) -> str | None:
-        """Опросить систему, обновить события; вернуть текст алерта (D5) или None."""
+    async def _tick_system(
+        self, watch: ZoneWatch, sid: str, now_epoch: float
+    ) -> str | None:
+        """Опросить систему, обновить события; вернуть блок алерта (D5) или None.
+
+        Алерт только если: сработал триггер D5 И появились киллы, которых не было
+        в предыдущем алерте (иначе «накопление ≥8/час» спамило бы без новостей).
+        """
         kills = await self._fetch_kills(sid, int(WINDOW_HOUR)) or []
         gate_kills = filter_gate_kills(kills, watch.gates_by_system.get(sid, set()))
         for kill in gate_kills:
@@ -314,43 +450,29 @@ class ZoneMonitor:
             events.popleft()
 
         recent = [e for e in events if e["ts"] >= now_epoch - WINDOW_BURST]
-        reasons: list[str] = []
-        if len(recent) >= watch.burst_threshold:
-            reasons.append(
-                f"всплеск ≥{watch.burst_threshold}/10 мин ({len(recent)} киллов на гейтах)"
-            )
-        if len(events) >= watch.hour_threshold:
-            reasons.append(f"накопление ≥{watch.hour_threshold}/час ({len(events)})")
         isk_10m = sum(e["droppable"] for e in recent)
-        if isk_10m >= watch.isk_burst:
-            reasons.append(f"droppable ISK за 10 мин ≥ {format_isk(watch.isk_burst)}")
-        if not reasons:
+        triggered = (
+            len(recent) >= watch.burst_threshold
+            or len(events) >= watch.hour_threshold
+            or isk_10m >= watch.isk_burst
+        )
+        last_ts = watch.last_alert_ts.get(sid, 0.0)
+        has_new = any(e["ts"] > last_ts for e in events)
+        if not triggered or not has_new:
             return None
         if time.monotonic() - watch.last_alert.get(sid, 0.0) < watch.cooldown:
             return None
         watch.last_alert[sid] = time.monotonic()
+        watch.last_alert_ts[sid] = max((e["ts"] for e in events), default=0.0)
 
-        by_gate: dict[int, list[dict]] = {}
-        for event in recent:
-            by_gate.setdefault(event["gate"], []).append(event)
-        ship_ids = {event["ship"] for event in recent if event["ship"]} - {CAPSULE_ID}
+        ship_ids = {e["ship"] for e in recent if e["ship"]} - {CAPSULE_ID}
         ship_names = await resolve_ship_names(self._session, ship_ids, self._ship_names)
-        lines = [f"🔥 Зона фарма: {watch.names[sid]}", "Причина: " + "; ".join(reasons)]
-        lines.append(f"Droppable ISK за 10 мин: {format_isk(isk_10m)}")
-        for gid, gate_events in by_gate.items():
-            gate_label = watch.gate_names.get(gid) or f"гейт {gid}"
-            ships = [e for e in gate_events if e["ship"] != CAPSULE_ID]
-            pods = len(gate_events) - len(ships)  # группировка ship+pod (OQ-4)
-            parts = [f"×{len(ships)}"]
-            if pods:
-                parts.append(f"×{pods} капсул(ы)")
-            lines.append(f"• {gate_label}: {', '.join(parts)}")
-        if ship_names:
-            lines.append("Корабли: " + ", ".join(sorted(ship_names.values())))
-        lines.append(f"zKillboard: https://zkillboard.com/system/{sid}/")
+        block = _format_activity_block(
+            watch.names[sid], events, now_epoch, watch.gate_names, ship_names
+        )
         if self.storage is not None:
             self.storage.log_alert(watch.chat_id, "zone", sid, time.time())
-        return "\n".join(lines)
+        return block
 
     def restore(self, graph, gate_index: dict[str, set[int]], gate_names) -> int:
         """Восстановить подписки зоны из Storage (после рестарта). Возвращает число."""

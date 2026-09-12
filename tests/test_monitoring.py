@@ -123,7 +123,7 @@ def test_route_alert_groups_ship_and_pod_and_links_zkb() -> None:
     text = bot.sent[0][1]
     assert "Stargate (Out): +1 новых, +1 капсул(ы), за час 3" in text  # OQ-4; 1+1+1=3 за час
     assert "Droppable ISK на гейтах за час: 1.50B" in text  # 7e8 + 8e8
-    assert "zKillboard: https://zkillboard.com/system/1/" in text
+    assert "zKillboard" not in text  # ссылки убраны по фидбеку (превью zK спамило)
 
 
 def test_fetch_hour_counts_alive_and_failed() -> None:
