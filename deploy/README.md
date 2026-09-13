@@ -17,6 +17,44 @@
 GitHub Actions: пуш в main → ruff+pytest → rsync по SSH → `systemctl restart gatecheck`.
 Секреты (SSH-ключ, хост) — в GitHub Secrets. Джобу добавить после публикации репо.
 
+## «Автообновление статики» — что это значит
+
+Статика = `data/graph.json` + `data/gates.json` (граф гейтов Нового Эдена из ESI).
+Она почти не меняется (CCP меняет карту раз в год), но ВРЕМЯ ОТ ВРЕМЕНИ обновлять нужно:
+появились новые системы/гейты, переименования. Сейчас на VPS она обновляется вручную:
+
+```bash
+ssh vps "cd /opt/gatecheck && runuser -u gatecheck -- .venv/bin/python scripts/fetch_static.py && systemctl restart gatecheck"
+```
+
+(пересборка ~4 мин: ~18 тыс. запросов к ESI; рестарт нужен, чтобы бот перечитал файлы).
+«Автообновление» = systemd-таймер (например, раз в сутки ночью), который делает то же самое
+без человека. Добавить на VPS:
+
+```bash
+/etc/systemd/system/gatecheck-static.service   # Type=oneshot — одна пересборка
+/etc/systemd/system/gatecheck-static.timer     # OnCalendar=*-*-* 04:00:00 UTC
+```
+
+Приоритет низкий: без этого бот работает на текущей статике неограниченно долго.
+
+## «Автодеплой GH Actions» — как работает
+
+Сейчас релиз = 3 команды руками (локально): `git push` → `ssh vps "git pull && restart"`.
+Автодеплой перекладывает это на GitHub: после каждого пуша в main GitHub сам запускает
+воркфлоу (в `.github/workflows/`), который: 1) гоняет ruff+pytest (уже есть), 2) подключается
+к VPS по SSH и выполняет `git pull && systemctl restart gatecheck`. Чтобы GitHub мог
+подключиться к серверу, нужно ОДИН раз настроить:
+
+1. Сгенерировать отдельный ключ для деплоя: `ssh-keygen -t ed25519 -f deploy_key -N ""`,
+   публичную половину добавить на VPS в `/home/gatecheck/.ssh/authorized_keys`
+   (деплой должен работать от юзера gatecheck, не root).
+2. В GitHub: Settings → Secrets and variables → Actions → добавить три секрета:
+   `VPS_HOST` (147.45.124.83), `VPS_USER` (gatecheck), `VPS_SSH_KEY` (содержимое deploy_key).
+3. Добавить job в ci.yml: шаги ssh-agent + rsync/pull + рестарт.
+
+После этого релиз = `git push` — тесты и выкатка происходят сами, в течение ~1 мин.
+
 ## Тонкости слабого VPS
 
 - лимит памяти в юните (MemoryMax=400M) — при OOM systemd перезапустит; состояние переживает
