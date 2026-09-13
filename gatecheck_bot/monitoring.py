@@ -206,6 +206,12 @@ class RouteMonitor:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
+    async def force_tick(self, chat_id: int, bot=None) -> None:
+        """Немедленный тик слежки чата вне расписания (кнопка «🔄 Обновить сейчас»)."""
+        watch = self.watches.get(chat_id)
+        if watch is not None:
+            await self._tick_watch(watch, bot)
+
     def status(self, chat_id: int) -> str:
         watch = self.watches.get(chat_id)
         if watch is None:

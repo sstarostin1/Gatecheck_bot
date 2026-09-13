@@ -191,3 +191,17 @@ def test_stop_and_status_inactive() -> None:
     assert "не было включено" in monitor.stop(1)
     monitor.start(1, ["1"], make_graph(), GATES, GATE_NAMES)
     assert "остановлено" in monitor.stop(1)
+
+
+def test_force_tick_updates_immediately() -> None:
+    """Кнопка «Обновить сейчас»: тик по требованию — алерт и статус свежие."""
+    polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
+    monitor = make_monitor(polls)
+    monitor.start(100, ["1", "2", "3"], make_graph(), GATES, GATE_NAMES)
+    asyncio.run(monitor._tick_all(FakeBot()))
+    polls["2"] = [kill(10, 502, value=5e8, ship=587)]
+    bot = FakeBot()
+    asyncio.run(monitor.force_tick(100, bot))
+    assert len(bot.sent) == 1  # алерт пришёл по требованию, вне расписания
+    assert "▲1" in monitor.status(100)
+    asyncio.run(monitor.aclose())

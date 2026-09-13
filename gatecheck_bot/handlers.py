@@ -12,7 +12,7 @@ import time
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from . import __version__
 from .config import BASE_DIR, Settings
@@ -26,6 +26,7 @@ from .routing import (
     resolve_system,
 )
 from .storage import Storage
+from .ui import REFRESH_TEXT, main_keyboard, refresh_inline
 from .zone import SETTING_BOUNDS, ZoneMonitor, clamp_setting, parse_setting_value
 
 PROCESS_STARTED_MONOTONIC = time.monotonic()
@@ -117,18 +118,39 @@ def build_router(
         user_settings = storage.get_settings(chat_id)
         return user_settings or None
 
+    async def force_refresh_text(chat_id: int, bot) -> str:
+        """Насильное обновление: немедленный тик активных слежек + свежий статус."""
+        parts: list[str] = []
+        if chat_id in zone_monitor.watches:
+            await zone_monitor.force_tick(chat_id, bot)
+            parts.append(await zone_monitor.status(chat_id))
+        if chat_id in monitor.watches:
+            await monitor.force_tick(chat_id, bot)
+            parts.append(monitor.status(chat_id))
+        if not parts:
+            graph = _get_graph()
+            if graph is None:
+                return "Граф ещё не собран: python scripts/fetch_static.py"
+            gate_index, gate_names = _get_gates()
+            if not gate_index:
+                return "data/gates.json не собран — активность недоступна."
+            parts.append(await zone_monitor.live_snapshot(graph, gate_index, gate_names))
+        return "\n\n".join(parts)
+
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
         name = message.from_user.first_name if message.from_user else "пилот"
         await message.answer(
             f"Привет, {name}! 👋\n\n"
-            f"Это Gatecheck Bot v{__version__} (скелет).\n\n"
-            "Умеет сейчас:\n"
-            "• /help — справка\n"
-            "• /ping — проверка живости (для админов)\n"
-            "• эхо — вернёт любой твой текст обратно\n\n"
-            "Мониторинг гейтов EVE Online будет добавлен в следующих версиях "
-            "(план — docs/VISION.md)."
+            f"Gatecheck Bot v{__version__} — слежение за гейт-кампами EVE Online.\n\n"
+            "Кнопки меню — под полем ввода (Обновить сейчас, Зона, Маршрут, Пороги).\n"
+            "Команды:\n"
+            "• /zone on — мониторинг зоны фарма «Hed + соседи» (алерты D5)\n"
+            "• /route A B — маршрут + слежение гейт-кампов (TTL 1 ч)\n"
+            "• /help — вся справка\n\n"
+            "Подписки переживают рестарт бота; состояние статики — data/."
+            ,
+            reply_markup=main_keyboard(),
         )
 
     @router.message(Command("help"))
@@ -142,7 +164,8 @@ def build_router(
             "/route status — статистика · /route stop — выключить\n"
             "/zone on|status|off — мониторинг зоны фарма «Hed + соседи»\n"
             "/settings — пороги алертов зоны (границы показываются)\n\n"
-            f"Версия: v{__version__}."
+            f"Версия: v{__version__}.",
+            reply_markup=main_keyboard(),
         )
 
     @router.message(Command("ping"))
@@ -225,7 +248,9 @@ def build_router(
             await message.answer(monitor.stop(message.chat.id))
             return
         if args.lower() in {"status", "статус"}:
-            await message.answer(monitor.status(message.chat.id))
+            await message.answer(
+                monitor.status(message.chat.id), reply_markup=refresh_inline()
+            )
             return
 
         graph = _get_graph()
@@ -267,7 +292,8 @@ def build_router(
         await message.answer(
             f"{text}\n\nСейчас на гейтах маршрута:\n" + "\n".join(stat_lines)
             + f"\n\n🛡 Слежение включено (TTL 60 мин, опрос каждые {int(monitor.poll_interval)} с)."
-            "\n/route status — статистика · /route stop — выключить."
+            "\n/route status — статистика · /route stop — выключить.",
+            reply_markup=refresh_inline(),
         )
 
     # /zone on|off|status — фоновый мониторинг зоны фарма (M2, пресет «Hed + соседи»).
@@ -297,13 +323,17 @@ def build_router(
                 f"Состав: {zone_names}\n\n"
                 "Алерты по гейтам зоны: всплеск ≥3 килла/10 мин, накопление ≥8/час, "
                 "дорогой droppable ISK.\n"
-                "/zone status — состояние · /zone off — выключить."
+                "/zone status — состояние · /zone off — выключить.",
+                reply_markup=refresh_inline(),
             )
         elif args in {"off", "выкл", "выключить"}:
             await message.answer(zone_monitor.stop(message.chat.id))
         elif args in {"status", "статус"}:
             if message.chat.id in zone_monitor.watches:
-                await message.answer(await zone_monitor.status(message.chat.id))
+                await message.answer(
+                    await zone_monitor.status(message.chat.id),
+                    reply_markup=refresh_inline(),
+                )
                 return
             graph = _get_graph()
             if graph is None:
@@ -319,7 +349,8 @@ def build_router(
                 return
             # Без подписки — разовый живой опрос зоны прямо сейчас.
             await message.answer(
-                await zone_monitor.live_snapshot(graph, gate_index, gate_names)
+                await zone_monitor.live_snapshot(graph, gate_index, gate_names),
+                reply_markup=refresh_inline(),
             )
         else:
             await message.answer(
@@ -328,6 +359,24 @@ def build_router(
                 "/zone status — состояние зоны\n"
                 "/zone off — выключить"
             )
+
+    # «🔄 Обновить сейчас» — насильственный тик активных слежек + свежий статус.
+    @router.message(F.text == REFRESH_TEXT)
+    async def cmd_refresh_button(message: Message) -> None:
+        await message.answer(
+            await force_refresh_text(message.chat.id, message.bot),
+            reply_markup=refresh_inline(),
+        )
+
+    @router.callback_query(F.data == "refresh:status")
+    async def cb_refresh_status(callback: CallbackQuery) -> None:
+        await callback.answer("Обновляю…")
+        if callback.message is None:
+            return
+        await callback.message.answer(
+            await force_refresh_text(callback.message.chat.id, callback.bot),
+            reply_markup=refresh_inline(),
+        )
 
     # Эхо на любой текст — основная проверка приёма/отправки на этом этапе.
     @router.message(F.text)

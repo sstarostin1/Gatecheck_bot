@@ -284,6 +284,12 @@ class ZoneMonitor:
             self.storage.add_zone_sub(chat_id)
         return watch
 
+    async def force_tick(self, chat_id: int, bot=None) -> None:
+        """Немедленный тик зоны чата вне расписания (кнопка «🔄 Обновить сейчас»)."""
+        watch = self.watches.get(chat_id)
+        if watch is not None:
+            await self._tick_watch(watch, bot)
+
     def stop(self, chat_id: int) -> str:
         if self.watches.pop(chat_id, None) is None:
             return "Зона не была включена. /zone on — включить."

@@ -224,3 +224,17 @@ def test_events_pruned_after_hour_window() -> None:
     run_ticks(monitor, FakeBot())
     watch = monitor.watches[7]
     assert len(watch.events["3"]) == 0  # всё старше часового окна — вычищено
+
+
+def test_force_tick_updates_immediately() -> None:
+    """Кнопка «Обновить сейчас»: тик по требованию — события и статус свежие."""
+    polls: dict[str, list[dict] | None] = {"3": [], "4": []}
+    monitor = make_monitor(polls)
+    monitor.start(7, make_graph(), GATES, GATE_NAMES)
+    run_ticks(monitor, FakeBot())
+    polls["3"] = [kill(1, 603, ago=120), kill(2, 603, ago=240), kill(3, 603, ago=420)]
+    bot = FakeBot()
+    asyncio.run(monitor.force_tick(7, bot))
+    assert len(bot.sent) == 1  # алерт по новым киллам пришёл сразу, вне расписания
+    status = asyncio.run(monitor.status(7))
+    assert "Gamma — за 10 мин: 3 килл(ов) на гейтах" in status
