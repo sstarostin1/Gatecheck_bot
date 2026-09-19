@@ -92,7 +92,7 @@ def test_build_route_reply_same_system(graph: Graph) -> None:
     from gatecheck_bot.handlers import build_route_reply
 
     text, route = build_route_reply(graph, "Alpha Alpha")
-    assert "уже там" in text and route == ["1"]
+    assert "уже там" in text and route is None  # слежение одной системы не запускается
 
 
 def test_build_route_reply_arrow_separator(graph: Graph) -> None:

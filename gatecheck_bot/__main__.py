@@ -16,7 +16,9 @@ import logging
 
 import aiohttp
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
@@ -108,7 +110,12 @@ async def run_transport(
     Устойчивый сетевой сбой — NetworkDead (наружному циклу нужна ротация).
     Прочие исключения фатальны (конфиг/токен) и уходят наружу как есть.
     """
-    bot = Bot(token=settings.bot_token, session=build_session(proxy_url))
+    bot = Bot(
+        token=settings.bot_token,
+        session=build_session(proxy_url),
+        # §0.1: HTML parse mode — <b>/<i>/<pre>/<blockquote expandable> во всех сообщениях.
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher()
     dp.include_router(build_router(settings, monitor, zone_monitor))
     polling_task: asyncio.Task | None = None

@@ -141,32 +141,53 @@ class Storage:
         kill_ts: float,
         droppable: float,
         ship_type_id: int | None,
+        features: dict | None = None,
     ) -> None:
+        """Сохранить килл «на гейте» (+ признаки v0.10 для восстановления после рестарта)."""
         self._conn.execute(
             "INSERT OR IGNORE INTO kill_events "
-            "(kill_id, system_id, gate_id, kill_ts, droppable, ship_type_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (kill_id, system_id, gate_id, kill_ts, droppable, ship_type_id),
+            "(kill_id, system_id, gate_id, kill_ts, droppable, ship_type_id, features_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                kill_id,
+                system_id,
+                gate_id,
+                kill_ts,
+                droppable,
+                ship_type_id,
+                json.dumps(features) if features else None,
+            ),
         )
         self._conn.commit()
 
     def kill_events_since(self, since_epoch: float) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT system_id, kill_id, gate_id, kill_ts, droppable, ship_type_id "
+            "SELECT system_id, kill_id, gate_id, kill_ts, droppable, ship_type_id, features_json "
             "FROM kill_events WHERE kill_ts >= ? ORDER BY kill_ts",
             (since_epoch,),
         ).fetchall()
-        return [
-            {
-                "system_id": str(row["system_id"]),
-                "kill_id": int(row["kill_id"]),
-                "gate_id": int(row["gate_id"]),
-                "kill_ts": float(row["kill_ts"]),
-                "droppable": float(row["droppable"]),
-                "ship_type_id": row["ship_type_id"],
-            }
-            for row in rows
-        ]
+        result = []
+        for row in rows:
+            features = None
+            raw = row["features_json"]
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    features = data if isinstance(data, dict) else None
+                except ValueError:
+                    features = None
+            result.append(
+                {
+                    "system_id": str(row["system_id"]),
+                    "kill_id": int(row["kill_id"]),
+                    "gate_id": int(row["gate_id"]),
+                    "kill_ts": float(row["kill_ts"]),
+                    "droppable": float(row["droppable"]),
+                    "ship_type_id": row["ship_type_id"],
+                    "features": features,
+                }
+            )
+        return result
 
     def prune_kill_events(self, before_epoch: float) -> None:
         self._conn.execute("DELETE FROM kill_events WHERE kill_ts < ?", (before_epoch,))

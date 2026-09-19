@@ -37,8 +37,8 @@ copy .env.example .env   # и вписать BOT_TOKEN от @BotFather
 ⚠️ Запускать нужно интерпретатором из `.venv` (или через `run.bat`), а не глобальным `python` —
 иначе получите `ModuleNotFoundError: No module named 'aiogram'`.
 
-Затем в Telegram: `/start` → приветствие **и меню кнопок под полем ввода** («🔄 Обновить сейчас»,
-`/zone status`, `/zone on`, `/route status`, `/route stop`, `/settings`, `/ping`). Полезное:
+Затем в Telegram: `/start` → приветствие **и меню кнопок под полем ввода** («🔄 Гейты: обновить»,
+«🛡 Зона: вкл/выкл», «🚀 Маршрут: статус/стоп», «⚙️ Пороги»). Полезное:
 `/zone on` — мониторинг зоны фарма «Hed + соседи» (алерты всплесков на гейтах); `/route Amamake Jita`
 → маршрут (15 прыжков) + слежение гейт-кампов (TTL 1 ч); `/zone status`, `/route status` —
 статистика (и кнопка «🔄 Обновить» на сообщении); `/settings` — пороги алертов; `/route stop`,

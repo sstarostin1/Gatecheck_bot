@@ -27,7 +27,7 @@ def test_migrations_create_tables(tmp_path) -> None:
 def test_migrations_applied_once(tmp_path) -> None:
     s = make_storage(tmp_path)
     count = s._conn.execute("SELECT COUNT(*) AS n FROM _migrations").fetchone()["n"]
-    assert count == 1
+    assert count == 2  # 001_init + 002_kill_features (v0.10)
     s.close()
 
 
