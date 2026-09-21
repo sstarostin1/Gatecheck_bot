@@ -24,7 +24,7 @@ from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from . import __version__
 from .config import ConfigError, Settings
-from .handlers import _get_gates, _get_graph, build_router
+from .handlers import _get_gate_labels, _get_gates, _get_graph, build_router
 from .monitoring import RouteMonitor
 from .storage import Storage
 from .transport import ProxyPool, mask_proxy_url
@@ -206,10 +206,12 @@ async def run(settings: Settings) -> None:
     try:
         # Восстановить слежки из SQLite до подключения (рестарт-персистентность).
         graph = _get_graph()
-        gate_index, gate_names, gate_labels = _get_gates()
+        gate_index, gate_names, gate_dest = _get_gates()
+        graph = _get_graph()
+        gate_labels = _get_gate_labels(graph) if graph is not None else {}
         if graph is not None and storage is not None:
             zones_restored = zone_monitor.restore(graph, gate_index, gate_names, gate_labels)
-            routes_restored = monitor.restore(graph, gate_index, gate_names)
+            routes_restored = monitor.restore(graph, gate_index, gate_names, gate_dest)
             if zones_restored or routes_restored:
                 logger.info(
                     "Восстановлено слежек после рестарта: зон %d, маршрутов %d.",

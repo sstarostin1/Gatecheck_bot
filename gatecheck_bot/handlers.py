@@ -91,6 +91,16 @@ def _get_gates() -> tuple[dict[str, set[int]], dict[int, str], dict[int, str]]:
     return _GATES
 
 
+def _get_gate_labels(graph) -> dict[int, str]:
+    """itemID → имя системы-назначения («на Amamake»); систем без имени в графе нет."""
+    labels: dict[int, str] = {}
+    for gid, sid in _get_gates()[2].items():
+        name = graph.name_of(str(sid))
+        if name:
+            labels[int(gid)] = name
+    return labels
+
+
 def build_route_reply(graph: Graph, query: str) -> tuple[str, list[str] | None]:
     """Текст ответа на /route (HTML) + список system_id (None — маршрута/разбора нет)."""
     parts = [part for part in re.split(r"\s*(?:→|->|;|,)\s*|\s+", query.strip()) if part]
@@ -211,7 +221,8 @@ def build_router(
         if not _gates_ready():
             await message.answer(esc(ERR_NO_GATES))
             return
-        gate_index, gate_names, gate_labels = _get_gates()
+        gate_index, gate_names, _ = _get_gates()
+        gate_labels = _get_gate_labels(graph)
         watch = zone_monitor.start(
             message.chat.id, graph, gate_index, gate_names, gate_labels,
             thresholds=user_thresholds(message.chat.id),
@@ -240,7 +251,8 @@ def build_router(
         if not _gates_ready():
             await message.answer(esc(ERR_NO_GATES))
             return
-        gate_index, gate_names, gate_labels = _get_gates()
+        gate_index, gate_names, _ = _get_gates()
+        gate_labels = _get_gate_labels(graph)
         # Без подписки — разовый живой опрос зоны прямо сейчас (§4).
         await message.answer(
             await zone_monitor.live_snapshot(graph, gate_index, gate_names, gate_labels)
@@ -528,7 +540,8 @@ def build_router(
         if not _gates_ready():
             await message.answer(esc(ERR_NO_GATES))
             return
-        gate_index, gate_names, gate_labels = _get_gates()
+        gate_index, gate_names, _ = _get_gates()
+        gate_labels = _get_gate_labels(graph)
         await message.answer(
             await zone_monitor.live_snapshot(graph, gate_index, gate_names, gate_labels)
         )
@@ -568,7 +581,8 @@ def build_router(
         if graph is None:
             await callback.message.answer(esc(ERR_NO_GRAPH))
             return
-        gate_index, gate_names, gate_labels = _get_gates()
+        gate_index, gate_names, _ = _get_gates()
+        gate_labels = _get_gate_labels(graph)
         if not gate_index:
             await callback.message.answer(esc(ERR_NO_GATES))
             return
