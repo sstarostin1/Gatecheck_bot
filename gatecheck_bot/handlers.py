@@ -204,7 +204,7 @@ def build_router(
 
     def user_thresholds(chat_id: int) -> dict | None:
         """Пользовательские пороги D5 из Storage (None — дефолты)."""
-        if storage is None:
+        if storage is None or not storage.available:
             return None
         user_settings = storage.get_settings(chat_id)
         return user_settings or None
@@ -268,7 +268,11 @@ def build_router(
         await message.answer(await monitor.status(message.chat.id))
 
     async def settings_view(message: Message) -> None:
-        current = storage.get_settings(message.chat.id) if storage else {}
+        current = (
+            storage.get_settings(message.chat.id)
+            if storage is not None and storage.available
+            else {}
+        )
         hour = int(current.get("hour", 8))
         isk = format_isk(float(current.get("isk", 5e8)))
         cooldown_min = int(float(current.get("cooldown", 900)) / 60)
@@ -351,11 +355,14 @@ def build_router(
         uptime_min = int((time.monotonic() - PROCESS_STARTED_MONOTONIC) / 60)
         requests = monitor.stat_requests + zone_monitor.stat_requests
         errors = monitor.stat_errors + zone_monitor.stat_errors
+        db_state = "ок" if (storage is not None and storage.available) else "НЕДОСТУПЕН"
+        db_tail = f" ({storage.error})" if (storage is not None and storage.error) else ""
         await message.answer(
             f"pong ✅ v{esc(__version__)}\n"
             f"Аптайм: {uptime_min} мин\n"
             f"Статика: {statics}\n"
             f"Слежки: зон {len(zone_monitor.watches)}, маршрутов {len(monitor.watches)}\n"
+            f"Хранилище: {db_state}{esc(db_tail)}\n"
             f"zK: запросов {requests}, ошибок {errors}"
         )
 
@@ -375,7 +382,11 @@ def build_router(
         return f"✅ {key} = {pretty} (действует со следующего /zone_on)"
 
     def _apply_setting(chat_id: int, key: str, value: float | bool) -> str:
-        if storage is None:
+        # v0.10.1: если хранилище временно недоступно — пробуем поднять его на месте
+        # (LazyStorage сам ретраит), и только потом честно сообщаем об ошибке.
+        if storage is not None and not storage.available:
+            storage.ensure()
+        if storage is None or not storage.available:
             return "Хранилище недоступно — пороги не сохраняются."
         user_settings = storage.get_settings(chat_id)
         if key == "attackers":
@@ -413,7 +424,7 @@ def build_router(
 
     @router.message(Command("settings_reset"))
     async def cmd_settings_reset(message: Message) -> None:
-        if storage is not None:
+        if storage is not None and storage.available:
             storage.set_settings(message.chat.id, {})
         await message.answer("Пороги сброшены к дефолтам — действуют со следующего /zone_on.")
 

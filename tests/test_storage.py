@@ -1,6 +1,6 @@
-"""Тесты SQLite-хранилища: миграции, подписки, маршруты, kill-кэш, алерты."""
+"""Тесты SQLite-хранилища: миграции, подписки, маршруты, kill-кэш, алерты, LazyStorage."""
 
-from gatecheck_bot.storage import Storage
+from gatecheck_bot.storage import LazyStorage, Storage
 
 
 def make_storage(tmp_path) -> Storage:
@@ -86,4 +86,49 @@ def test_alerts_last_epoch(tmp_path) -> None:
     s.log_alert(2, "route", "9", sent_epoch=300.0)
     assert s.last_alert_epochs("zone") == {(1, "3"): 500.0}
     assert s.last_alert_epochs("route") == {(2, "9"): 300.0}
+    s.close()
+
+
+def test_migrations_duplicate_column_tolerated(tmp_path) -> None:
+    """База, где 002 фактически применён, но не помечен (duplicate column) — не клинит старт."""
+    db = tmp_path / "legacy.sqlite3"
+    s = make_storage(tmp_path)
+    s._conn.execute("DELETE FROM _migrations WHERE name = '002_kill_features.sql'")
+    s._conn.commit()
+    s.close()
+    # Пересоздание обязано пройти: повторный ALTER TABLE упадёт с duplicate column,
+    # Storage это глотает и помечает миграцию применённой.
+    s2 = Storage(db)
+    names = {row["name"] for row in s2._conn.execute("SELECT name FROM _migrations")}
+    assert "002_kill_features.sql" in names
+    s2.close()
+
+
+def test_lazy_storage_delegates_and_recovers(tmp_path) -> None:
+    lazy = LazyStorage(tmp_path / "lazy.sqlite3")
+    assert not lazy.available
+    assert lazy.ensure(force=True)
+    assert lazy.available
+    lazy.set_settings(42, {"cooldown": 300})
+    assert lazy.get_settings(42) == {"cooldown": 300}
+    lazy.close()
+    assert not lazy.available
+
+
+def test_lazy_storage_reports_error_on_bad_path(tmp_path) -> None:
+    lazy = LazyStorage(tmp_path)  # путь — директория: connect обязан падать
+    assert not lazy.ensure(force=True)
+    assert not lazy.available
+    assert lazy.error is not None
+    try:
+        lazy.get_settings(1)
+        raise AssertionError("ожидали RuntimeError")
+    except RuntimeError:
+        pass
+
+
+def test_storage_has_lazy_compatible_status_api(tmp_path) -> None:
+    s = make_storage(tmp_path)
+    assert s.available is True
+    assert s.error is None
     s.close()

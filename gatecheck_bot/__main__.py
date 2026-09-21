@@ -26,7 +26,7 @@ from . import __version__
 from .config import ConfigError, Settings
 from .handlers import _get_gate_labels, _get_gates, _get_graph, build_router
 from .monitoring import RouteMonitor
-from .storage import Storage
+from .storage import LazyStorage
 from .transport import ProxyPool, mask_proxy_url
 from .transport.checker import TG_PROBE_URL
 from .transport.xray import XrayManager
@@ -185,11 +185,10 @@ async def run_transport(
 async def run(settings: Settings) -> None:
     """Выбрать живой транспорт и крутить polling; при сбоях — ротация (см. модуль)."""
     xray = XrayManager()
-    storage: Storage | None = None
-    try:
-        storage = Storage(settings.db_path)
-    except Exception as exc:
-        logger.error("SQLite недоступен (%s) — работаем в памяти, рестарт потеряет слежки.", exc)
+    # v0.10.1: ленивое хранилище с ретраями — падение при старте (права/схема) больше
+    # не оставляет бота без SQLite навсегда; /ping показывает статус.
+    storage = LazyStorage(settings.db_path)
+    storage.ensure(force=True)
     monitor = RouteMonitor(storage=storage)  # живёт через ротации транспортов
     zone_monitor = ZoneMonitor(storage=storage)
     pool: ProxyPool | None = None
@@ -209,7 +208,7 @@ async def run(settings: Settings) -> None:
         gate_index, gate_names, gate_dest = _get_gates()
         graph = _get_graph()
         gate_labels = _get_gate_labels(graph) if graph is not None else {}
-        if graph is not None and storage is not None:
+        if graph is not None and storage.available:
             zones_restored = zone_monitor.restore(graph, gate_index, gate_names, gate_labels)
             routes_restored = monitor.restore(graph, gate_index, gate_names, gate_dest)
             if zones_restored or routes_restored:
@@ -271,8 +270,7 @@ async def run(settings: Settings) -> None:
         await xray.stop()
         await monitor.aclose()
         await zone_monitor.aclose()
-        if storage is not None:
-            storage.close()
+        storage.close()
 
 
 def main() -> None:

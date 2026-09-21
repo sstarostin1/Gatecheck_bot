@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from pathlib import Path
 
 logger = logging.getLogger("gatecheck_bot.storage")
@@ -38,13 +39,30 @@ class Storage:
             if path.name in applied:
                 continue
             logger.info("Применяю миграцию %s", path.name)
-            self._conn.executescript(path.read_text(encoding="utf-8"))
+            try:
+                self._conn.executescript(path.read_text(encoding="utf-8"))
+            except sqlite3.OperationalError as exc:
+                # Старая база могла получить колонку вне миграций (промежуточная сборка):
+                # duplicate column не должен клинить каждый рестарт — фиксируем и идём дальше.
+                if "duplicate column" not in str(exc).lower():
+                    raise
+                logger.warning("Миграция %s: %s — помечаю применённой.", path.name, exc)
             self._conn.execute("INSERT INTO _migrations (name) VALUES (?)", (path.name,))
             self._conn.commit()
             applied.add(path.name)
 
     def close(self) -> None:
         self._conn.close()
+
+    @property
+    def available(self) -> bool:
+        """Совместимо с LazyStorage: готовый Storage всегда доступен."""
+        return True
+
+    @property
+    def error(self) -> Exception | None:
+        """Совместимо с LazyStorage: у готового Storage ошибки нет."""
+        return None
 
     # --- пользователи и настройки (OQ-8, /settings) -----------------------
 
@@ -213,3 +231,67 @@ class Storage:
             (int(row["chat_id"]), str(row["system_id"])): float(row["last_epoch"])
             for row in rows
         }
+        return {
+            (int(row["chat_id"]), str(row["system_id"])): float(row["last_epoch"])
+            for row in rows
+        }
+
+
+class LazyStorage:
+    """Обёртка над Storage с ЛЕНИВОЙ инициализацией и ретраями (v0.10.1).
+
+    Проблема: если Storage() падает при старте процесса (права на data/, старая схема,
+    lock), бот оставался без SQLite навсегда — настройки не сохранялись до рестарта.
+    LazyStorage ретраит создание при каждом обращении (не чаще раза в RETRY_INTERVAL),
+    поэтому чинится сам, как только причина ушла — рестарт не нужен.
+    """
+
+    RETRY_INTERVAL = 30.0  # сек между попытками пересоздать Storage
+
+    def __init__(self, path: str | Path = "data/gatecheck.sqlite3") -> None:
+        self.path = Path(path)
+        self._storage: Storage | None = None
+        self._error: Exception | None = None
+        self._last_attempt = 0.0
+
+    @property
+    def available(self) -> bool:
+        """True, если SQLite готов к работе (создан и миграции применены)."""
+        return self._storage is not None
+
+    @property
+    def error(self) -> Exception | None:
+        """Последняя причина недоступности (для /ping и логов)."""
+        return self._error
+
+    def ensure(self, force: bool = False) -> bool:
+        """Попытаться создать Storage (не чаще раза в RETRY_INTERVAL, force — сразу)."""
+        if self._storage is not None:
+            return True
+        now = time.monotonic()
+        if not force and now - self._last_attempt < self.RETRY_INTERVAL:
+            return False
+        self._last_attempt = now
+        try:
+            self._storage = Storage(self.path)
+        except Exception as exc:  # любая причина = работаем без SQLite
+            self._error = exc
+            logger.warning("SQLite недоступен (%s) — пороги/слежки не сохраняются.", exc)
+            return False
+        self._error = None
+        logger.info("SQLite готов: %s", self.path)
+        return True
+
+    def close(self) -> None:
+        if self._storage is not None:
+            self._storage.close()
+            self._storage = None
+
+    def __getattr__(self, name: str):
+        """Делегация к реальному Storage; без него — явная ошибка, не тихий None."""
+        storage = self.__dict__.get("_storage")
+        if storage is None:
+            raise RuntimeError(
+                f"Хранилище недоступно ({self.__dict__.get('_error')}) — вызов {name} невозможен"
+            )
+        return getattr(storage, name)
