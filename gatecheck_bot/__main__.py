@@ -206,9 +206,9 @@ async def run(settings: Settings) -> None:
     try:
         # Восстановить слежки из SQLite до подключения (рестарт-персистентность).
         graph = _get_graph()
-        gate_index, gate_names = _get_gates()
+        gate_index, gate_names, gate_labels = _get_gates()
         if graph is not None and storage is not None:
-            zones_restored = zone_monitor.restore(graph, gate_index, gate_names)
+            zones_restored = zone_monitor.restore(graph, gate_index, gate_names, gate_labels)
             routes_restored = monitor.restore(graph, gate_index, gate_names)
             if zones_restored or routes_restored:
                 logger.info(

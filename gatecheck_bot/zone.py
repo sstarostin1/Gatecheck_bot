@@ -444,7 +444,7 @@ class ZoneMonitor:
         has_new = any(e["ts"] > last_ts for e in hour_events)
         if not triggered or not has_new:
             return None
-        if time.monotonic() - watch.last_alert.get(sid, 0.0) < watch.cooldown:
+        if time.monotonic() - watch.last_alert.get(sid, float("-inf")) < watch.cooldown:
             return None
         watch.last_alert[sid] = time.monotonic()
         watch.last_alert_ts[sid] = max((e["ts"] for e in hour_events), default=0.0)

@@ -60,7 +60,9 @@ def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> ZoneMonitor:
     async def fake_ships(session, type_ids, cache):
         return {587: "Rifter", 670: "Capsule"}
 
-    monitor = ZoneMonitor(request_gap=0, hed_ids=HED, fetcher=fetcher, **kwargs)
+    monitor = ZoneMonitor(
+        request_gap=0, hed_ids=HED, fetcher=fetcher, cooldown=0.0, **kwargs
+    )
     zone_module.resolve_ship_names = fake_ships
     return monitor
 
@@ -150,8 +152,7 @@ def test_delta_shows_only_for_recent_kills() -> None:
 
 def test_anti_spam_no_repeat_without_new_kills() -> None:
     polls = {"3": [kill(i, 603, ago=120 * i) for i in range(1, 9)], "4": []}
-    monitor = make_monitor(polls)
-    monitor.cooldown = 0.0  # КД выключен — проверяем только анти-спам по новым киллам
+    monitor = make_monitor(polls)  # КД выключен в helper — проверяем только анти-спам
     start_zone(monitor)
     bot = FakeBot()
     run_ticks(monitor, bot, times=2)
@@ -161,6 +162,7 @@ def test_anti_spam_no_repeat_without_new_kills() -> None:
 def test_cooldown_suppresses_repeat_alert() -> None:
     polls = {"3": [kill(i, 603, ago=120 * i) for i in range(1, 9)], "4": []}
     monitor = make_monitor(polls)
+    monitor.cooldown = 900.0  # дефолт 15 мин — задаём явно (в helper выключен)
     start_zone(monitor)
     bot = FakeBot()
     run_ticks(monitor, bot)
