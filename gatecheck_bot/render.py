@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 
 __all__ = [
     "bold",
+    "capsules_note",
+    "capsules_word",
     "code",
     "esc",
     "format_isk",
@@ -50,6 +52,20 @@ def kills_word(n: int) -> str:
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
         return "килла"
     return "киллов"
+
+
+def capsules_word(n: int) -> str:
+    """Плюрализация капсул (§0.13): 1 капсула · 2–4 капсулы · 5+ капсул."""
+    if n % 10 == 1 and n % 100 != 11:
+        return "капсула"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "капсулы"
+    return "капсул"
+
+
+def capsules_note(n: int) -> str:
+    """Приписка к счётчику киллов: « (+2 капсулы)»; ноль капсул — пустая строка (§0.13)."""
+    return f" (+{n} {capsules_word(n)})" if n else ""
 
 
 def systems_word(n: int) -> str:
@@ -91,7 +107,8 @@ def eve_time() -> str:
 def zone_footer() -> str:
     """Footer всех зональных репортов (§0.4, курсив)."""
     return italic(
-        "Статистика за последний час. Запрос репорта по /zone_status. "
+        "Статистика за последний час, без подбитых капсул: их импланты не выпадают. "
+        "Запрос репорта по /zone_status. "
         f"Местное время - {eve_time()} ET"
     )
 
@@ -99,6 +116,7 @@ def zone_footer() -> str:
 def route_footer() -> str:
     """Footer всех маршрутных сообщений (курсив)."""
     return italic(
-        "Статистика за последний час. Остановить слежение: /route_stop. "
+        "Статистика за последний час, без подбитых капсул: их импланты не выпадают. "
+        "Остановить слежение: /route_stop. "
         f"Местное время - {eve_time()} ET"
     )

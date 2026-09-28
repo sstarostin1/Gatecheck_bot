@@ -93,6 +93,22 @@ def test_extract_features_bombs_and_bubbles() -> None:
     assert plain["bubble"] is False
 
 
+def test_extract_features_marks_capsule_and_drops_isk() -> None:
+    """§0.13: капсула — не килл: droppable = 0, атакующие-капсулы в списке кораблей нет."""
+    pod = extract_features(kill(3, 500, ship=670, value=9e8, att_ship=670), frozenset())
+    assert pod["capsule"] is True
+    assert pod["droppable"] == 0.0  # импланты подобрать нельзя — в ISK не идут
+    assert pod["att_ships"] == ()
+    ship = extract_features(kill(4, 500, ship=587, value=9e8, att_ship=587), frozenset())
+    assert ship["capsule"] is False
+    assert ship["droppable"] == 9e8
+    assert ship["att_ships"] == (587,)
+    # 33328 — Capsule - Genolution 'Auroral' 197-variant: та же группа Capsule (ESI, 29).
+    gold = extract_features(kill(5, 500, ship=33328, value=4e9), frozenset())
+    assert gold["capsule"] is True
+    assert gold["droppable"] == 0.0
+
+
 def test_snapshot_no_alerts_and_verdict_clean() -> None:
     polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
     monitor = make_monitor(polls)
@@ -127,6 +143,41 @@ def test_alert_only_on_route_gate() -> None:
     assert "droppable" not in text  # сумма выпавшего на маршруте не показывается (§7)
     assert "🛡 Слежение маршрута Alpha → Gamma — осталось" in text
     assert "Остановить слежение: /route_stop" in text
+    asyncio.run(monitor.aclose())
+
+
+def test_route_pod_kill_pushes_and_reports_pod_only_gate() -> None:
+    """§0.13: на маршруте капсула — тоже килл: пуш, вердикт 🟠 и «только капсулы»."""
+    polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
+    monitor = make_monitor(polls)
+    watch = begin(monitor)
+    asyncio.run(monitor.snapshot(watch))
+    bot = FakeBot()
+    # Капсула на 🚩-гейте системы «2» (501): пуш приходит, хотя кораблей за час нет.
+    polls["2"] = [kill(30, 501, ship=670, value=5e8, ago=60)]
+    asyncio.run(monitor.force_tick(100, bot, send=True))
+    assert len(bot.sent) == 1
+    text = bot.sent[0][1]
+    assert "<blockquote expandable><b>В Beta между Alpha и Gamma</b> только капсулы (+1 за час)" in text
+    assert "🚩 на Alpha: только капсулы (+1 за час)" in text
+    assert "droppable" not in text  # на маршруте сумма выпавшего не показывается (§7)
+    level, _ = route_verdict(watch, time.time())
+    assert level == 2  # капсула на маршрутном гейте — кемп (🟠), как и корабль
+    asyncio.run(monitor.aclose())
+
+
+def test_route_gate_line_counts_ships_and_notes_capsules() -> None:
+    """§0.13: счётчик — корабли, капсулы припиской; дельта «за 10 минут» — тоже корабли."""
+    polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
+    monitor = make_monitor(polls)
+    watch = begin(monitor)
+    asyncio.run(monitor.snapshot(watch))
+    bot = FakeBot()
+    polls["1"] = [kill(40, 500, ago=60), kill(41, 500, ship=670, value=2e8, ago=40)]
+    asyncio.run(monitor.force_tick(100, bot, send=True))
+    text = bot.sent[0][1]
+    assert "<b>В Alpha между Beta</b> 1 килл (+1 капсула) на гейтах" in text
+    assert "🚩 на Beta: 1 за час (+1 капсула) (+1 за последние 10 минут)" in text
     asyncio.run(monitor.aclose())
 
 

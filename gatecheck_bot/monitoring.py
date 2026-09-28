@@ -1,4 +1,4 @@
-"""Слежение за маршрутом (M3) + общая логика киллов — v0.10 (спека docs/MESSAGES.md).
+"""Слежение за маршрутом (M3) + общая логика киллов — v0.11 (спека docs/MESSAGES.md §0.13).
 
 Один маршрут на чат: /route A B (первый опрос + вердикт, §6), /route_status (§8),
 /route_stop. Тик каждые ~50 с: для каждой системы маршрута — киллы zK за час;
@@ -6,8 +6,15 @@
 ±1 систему по маршруту; ПУШИ — только по ним, сразу, КД нет (§0.10). Киллы на
 прочих гейтах систем маршрута пуша не дают — поднимают вердикт до 🟡 (§7).
 
+Капсулы (§0.13): подбитая капсула (группа Capsule: 670 и 33328) не считается киллом —
+её droppable-стоимость это импланты, которые подобрать нельзя (droppable = 0), а сам
+килл почти всегда дублирует только что подбитый корабль. Поэтому все счётчики —
+корабли, капсулы идут припиской (+N капсул). Исключение — маршрут: там капсула такой
+же признак кемпа, как корабль, поэтому она даёт пуш и поднимает вердикт, а гейт/система
+с одними капсулами показываются строкой «только капсулы (+N за час)».
+
 Атака (§1/§7): тип кемпа по zkb.solo (соло/коллективный/смешанный), состав кораблей —
-типы кораблей АТАКУЮЩИХ (полные киллмейлы zK отдаёт сам — zkb.json не нужен).
+типы кораблей АТАКУЮЩИХ без капсул (полные киллмейлы zK отдаёт сам — zkb.json не нужен).
 Бомбы/бабблы — только ПРИЗНАКИ (надёжного алгоритма не существует, §7):
 💣 — weapon_type_id атакующих из SDE-группы Smart Bomb (id 55, грузится с ESI);
 🫧 — дикторы/HIC среди кораблей атакующих или пусковики ISL (11584) / WDFG (16279).
@@ -29,6 +36,7 @@ import aiohttp
 
 from .render import (
     bold,
+    capsules_note,
     esc,
     format_isk,
     kills_word,
@@ -49,7 +57,10 @@ WINDOW_SECONDS = 3600.0  # окно статистики zK, с (§0.7: толь
 WINDOW_DELTA = 600.0     # скользящее окно дельты «за последние 10 минут» (§1)
 REQUEST_GAP = 0.3        # пауза между запросами к zK (этикет)
 SEEN_CAP = 20000         # потолок памяти дедупликации на слежку
-CAPSULE_ID = 670         # капсула — не корабль (в составе атакующих не показывается)
+CAPSULE_GROUP_ID = 29    # SDE-группа Capsule (ESI /universe/groups/29/)
+# Капсулы — не корабли (§0.13): 670 — обычная, 33328 — Genolution 'Auroral' 197-variant.
+# Группа проверена по ESI 2026-09-29 (group 29 = ровно {670, 33328}).
+CAPSULE_IDS = frozenset({670, 33328})
 
 # Признаки бабблов (§7): только маркер, не гарантия.
 DICTOR_IDS = frozenset({22456, 22464, 22444, 22460})  # Sabre/Flycatcher/Eris/Heretic
@@ -157,17 +168,37 @@ async def smartbomb_type_ids(session: aiohttp.ClientSession) -> frozenset[int]:
     return _smartbomb_ids
 
 
+def split_pods(events: list[dict]) -> tuple[list[dict], int]:
+    """(киллы кораблей, число подбитых капсул): капсулы боем не считаются (§0.13)."""
+    ships = [e for e in events if not e.get("capsule")]
+    return ships, len(events) - len(ships)
+
+
+def ship_count(events: list[dict]) -> int:
+    """Сколько в событиях киллов кораблей (капсулы не считаются, §0.13)."""
+    return len(split_pods(events)[0])
+
+
 def extract_features(kill: dict, bomb_ids: frozenset[int]) -> dict:
-    """Признаки килла для блоков (§1/§7): атака, бомбы/бабблы, ISK, гейт."""
+    """Признаки килла для блоков (§1/§7): атака, бомбы/бабблы, ISK, гейт, капсула.
+
+    Капсула и её варианты (CAPSULE_IDS — группа Capsule) — не корабли (§0.13):
+    в составе атакующих не показываются, а droppable капсулы — импланты, которые
+    подобрать нельзя, поэтому droppable = 0.
+    """
     zkb = kill.get("zkb", {})
     players = [a for a in kill.get("attackers", []) if a.get("character_id")]
-    ships = sorted({int(a["ship_type_id"]) for a in players if a.get("ship_type_id")})
+    ships = sorted(
+        {int(a["ship_type_id"]) for a in players if a.get("ship_type_id")} - CAPSULE_IDS
+    )
     weapons = {int(a["weapon_type_id"]) for a in players if a.get("weapon_type_id")}
+    capsule = _victim_ship(kill) in CAPSULE_IDS
     return {
         "ts": kill_epoch(kill),
         "kid": int(kill["killmail_id"]),
-        "droppable": float(zkb.get("totalDroppableValue") or 0.0),
+        "droppable": 0.0 if capsule else float(zkb.get("totalDroppableValue") or 0.0),
         "ship": _victim_ship(kill),
+        "capsule": capsule,
         "gate": int(zkb.get("locationID") or 0),
         "solo": bool(zkb.get("solo")),
         "npc": bool(zkb.get("npc")),
@@ -229,21 +260,34 @@ def gate_lines(
     include_attack: bool = True,
     include_isk: bool = True,
     route_marker: bool = False,
+    show_pod_only: bool = False,
 ) -> list[str]:
-    """Строки одного гейта (§1/§7): счёт за час, дельта за 10 мин, ISK, атака."""
+    """Строки одного гейта (§1/§7): счёт за час, дельта за 10 мин, ISK, атака.
+
+    Счёт — корабли, капсулы идут припиской «(+N капсул)» и в ISK не входят (§0.13).
+    show_pod_only=False (зона): гейт без киллов кораблей не выводится вообще — для зоны
+    капсулы не информация; show_pod_only=True (маршрут): выводится «только капсулы».
+    """
     hour = [
         e for e in events if e["ts"] >= now_epoch - WINDOW_SECONDS and e["gate"] == gate_id
     ]
-    delta = sum(1 for e in hour if e["ts"] >= now_epoch - WINDOW_DELTA)
-    line = f"{'🚩 ' if route_marker else ''}на {esc(dest_label)}: {len(hour)} за час"
-    if delta:
-        line += f" (+{delta} за последние 10 минут)"
-    if include_isk:
-        line += f", droppable {format_isk(sum(e['droppable'] for e in hour))}"
+    ships, pods = split_pods(hour)
+    if not ships and not show_pod_only:
+        return []
+    marker = "🚩 " if route_marker else ""
+    if not ships:
+        line = f"{marker}на {esc(dest_label)}: только капсулы (+{pods} за час)"
+    else:
+        delta = sum(1 for e in ships if e["ts"] >= now_epoch - WINDOW_DELTA)
+        line = f"{marker}на {esc(dest_label)}: {len(ships)} за час{capsules_note(pods)}"
+        if delta:
+            line += f" (+{delta} за последние 10 минут)"
+        if include_isk:
+            line += f", droppable {format_isk(sum(e['droppable'] for e in ships))}"
     lines = [line]
     attack = attack_text(hour, ship_names, include_attack)
     if attack:
-        lines.append(attack)
+        lines.append(esc(attack))
     return lines
 
 
@@ -333,24 +377,30 @@ def verdict_line(level: int, levels: dict[int, list[str]], prefix: bool = False)
 def route_system_block(
     watch: RouteWatch, sid: str, now_epoch: float, ship_names: dict[int, str]
 ) -> str:
-    """Quote-блок горящей системы маршрута (§7): маршрутные гейты (🚩) первыми."""
+    """Quote-блок горящей системы маршрута (§7): маршрутные гейты (🚩) первыми.
+
+    Счёт — корабли, капсулы припиской (§0.13). Система/гейт, где были только капсулы,
+    остаются в блоке: на маршруте это признак кемпа («только капсулы (+N за час)»).
+    """
     events = watch.hour_events(sid, now_epoch)
     idx = watch.route.index(sid)
     neighbours = [
         watch.names[watch.route[j]] for j in (idx - 1, idx + 1) if 0 <= j < len(watch.route)
     ]
     between = esc(" и ".join(neighbours)) if neighbours else "—"
-    total = len(events)
-    lines = [
-        bold(f"В {esc(watch.names[sid])} между {between}") + f" {total} {kills_word(total)} на гейтах"
-    ]
+    ships, pods = split_pods(events)
+    if ships:
+        head = f" {len(ships)} {kills_word(len(ships))}{capsules_note(pods)} на гейтах"
+    else:
+        head = f" только капсулы (+{pods} за час)"
+    lines = [bold(f"В {esc(watch.names[sid])} между {between}") + head]
     gates: dict[int, list[dict]] = {}
     for event in events:
         gates.setdefault(event["gate"], []).append(event)
     route_gates = watch.route_gates.get(sid, set())
     ordered = sorted(
         gates.items(),
-        key=lambda kv: (kv[0] not in route_gates, -len(kv[1])),  # 🚩 первыми (§7)
+        key=lambda kv: (kv[0] not in route_gates, -ship_count(kv[1])),  # 🚩 первыми (§7)
     )
     for gid, gate_events in ordered:
         dest = watch.gate_names.get(gid, "")
@@ -366,6 +416,7 @@ def route_system_block(
                 include_attack=True,
                 include_isk=False,  # сумма выпавшего на маршруте не показывается (§7)
                 route_marker=gid in route_gates,
+                show_pod_only=True,  # на маршруте капсулы — информация (§0.13)
             )
         )
     return quote("\n".join(lines))
@@ -571,6 +622,7 @@ class RouteMonitor:
                 feature = extract_features(kill, bomb_ids)
                 watch.seen.add(kid)
                 watch.events[sid].append(feature)
+                # §0.13: капсула на 🚩-гейте — тоже килл (признак кемпа): не фильтруем её.
                 if (
                     was_baselined
                     and feature["gate"] in watch.route_gates.get(sid, set())

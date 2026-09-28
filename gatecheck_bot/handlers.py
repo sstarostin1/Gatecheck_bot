@@ -233,7 +233,8 @@ def build_router(
         await message.answer(
             f"🔥 Зона включена: «Hed + соседи», {len(watch.systems)} "
             f"{systems_word(len(watch.systems))}, опрос каждые {int(zone_monitor.poll_interval)} с.\n"
-            f"Алерты: ≥{hour} киллов на гейтах за час или droppable ≥{esc(isk)} за час.\n"
+            f"Алерты: ≥{hour} киллов (кораблей) на гейтах за час или droppable ≥{esc(isk)} "
+            "за час (без капсул).\n"
             "/zone_status — состояние · /zone_off — выключить."
         )
 
@@ -282,9 +283,9 @@ def build_router(
         low_c, high_c = SETTING_BOUNDS["cooldown"]
         await message.answer(
             bold("Пороги зоны (D5), границы:") + "\n"
-            f"• hour: {hour} киллов на гейтах за час (пределы {low_h:g}…{high_h:g})\n"
-            f"• isk: {esc(isk)} droppable на гейтах за час (пределы {esc(format_isk(low_i))}…"
-            f"{esc(format_isk(high_i))})\n"
+            f"• hour: {hour} киллов (кораблей) на гейтах за час (пределы {low_h:g}…{high_h:g})\n"
+            f"• isk: {esc(isk)} droppable (без капсул) на гейтах за час (пределы "
+            f"{esc(format_isk(low_i))}…{esc(format_isk(high_i))})\n"
             f"• cooldown: {cooldown_min} мин (пределы {int(low_c / 60)}…{int(high_c / 60)} мин) "
             "— только для зоны\n"
             f"• атака в алертах: {attackers} — сообщение о составе и виде кемпа\n\n"
@@ -333,6 +334,8 @@ def build_router(
             "/settings — пороги алертов\n\n"
             "Кнопки: 🔄 Гейты: обновить · 🛡 Зона вкл/выкл · 🚀 Маршрут · ⚙️ Пороги.\n"
             "Все отчёты — только по киллам на гейтах, не далее чем за последний час.\n"
+            "Киллы — это подбитые корабли: капсулы идут припиской (+N капсул) и в счётчики/ISK "
+            "не входят — их импланты не выпадают.\n"
             f"Версия: v{esc(__version__)}, "
             '[Гитхаб-репозиторий](https://github.com/sstarostin1/Gatecheck_bot).',
             reply_markup=main_keyboard(),

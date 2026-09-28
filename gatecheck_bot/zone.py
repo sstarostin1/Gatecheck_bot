@@ -1,17 +1,24 @@
-"""Фоновый мониторинг зоны фарма (M2) — v0.10 (спека docs/MESSAGES.md).
+"""Фоновый мониторинг зоны фарма (M2) — v0.11 (спека docs/MESSAGES.md §0.13).
 
 Зона — пресет «Hed + соседи» (D7): констелляция Hed (6 систем) плюс системы,
 соединённые с ними гейтами (§6.1 VISION). Тик раз в ~4 мин (G1): для каждой системы —
 киллы zK за час, фильтр «на гейте» = zkb.locationID ∈ itemID гейтов (D4).
 
-v0.10 (§0.7): десятиминутные триггеры УДАЛЕНЫ (zK отдаёт киллы с задержкой — окно
-всегда пустое). Триггеры только часовые: ≥ {hour} киллов на гейтах системы за час
-(дефолт 8) ИЛИ droppable ISK на гейтах за час ≥ {isk} (дефолт 0.5B). Анти-спам:
-повторный алерт только при НОВЫХ киллах с прошлого алерта + cooldown 15 мин
+v0.11 (§0.13): капсулы боем не считаются. «Килл» — подбитый корабль; подбитая капсула
+почти всегда дублирует только что убитый корабль, а её droppable — импланты, которые
+подобрать нельзя (в extract_features у капсулы droppable = 0). Поэтому в зоне счётчики,
+порог hour и дельта — по кораблям, капсулы идут припиской «(+N капсул)» рядом с числом
+кораблей, а гейт/система, где за час были ТОЛЬКО капсулы, для зоны не существует:
+не выводится, не «горит» и попадает в «✅ Чисто».
+
+Триггеры (v0.10, §0.7): десятиминутные УДАЛЕНЫ (zK отдаёт киллы с задержкой — окно
+всегда пустое). Триггеры только часовые: ≥ {hour} киллов кораблей на гейтах системы
+за час (дефолт 8) ИЛИ droppable ISK на гейтах за час ≥ {isk} (дефолт 0.5B; без капсул).
+Анти-спам: повторный алерт только при НОВЫХ киллах с прошлого алерта + cooldown 15 мин
 (настраивается, только для зоны). Формат алертов/статусов — §1–§4: bold-заголовок
 «Сейчас гайки кемпят в системе/системах:», quote-блоки систем (первая строка
-«{система} N киллов и {ISK} на гейтах», пер-гейт дельта «(+N за последние 10 минут)»),
-footer с EVE Time — курсивом. Блоки систем сортируются по убыванию киллов (§0.12).
+«{система} N киллов (+M капсул) и {ISK} на гейтах», пер-гейт дельта «(+N за последние
+10 минут)»), footer с EVE Time — курсивом. Блоки систем сортируются по убыванию киллов (§0.12).
 """
 
 from __future__ import annotations
@@ -27,19 +34,29 @@ from datetime import UTC, datetime
 import aiohttp
 
 from .monitoring import (
-    WINDOW_DELTA,
     ZK_UA,
     Fetcher,
-    attack_text,
     extract_features,
     fetch_system_kills,
     filter_gate_kills,
     format_isk,
+    gate_lines,
     kill_epoch,
     resolve_ship_names,
+    ship_count,
     smartbomb_type_ids,
+    split_pods,
 )
-from .render import bold, esc, italic, kills_word, quote, systems_word, zone_footer
+from .render import (
+    bold,
+    capsules_note,
+    esc,
+    italic,
+    kills_word,
+    quote,
+    systems_word,
+    zone_footer,
+)
 from .storage import Storage
 
 logger = logging.getLogger("gatecheck_bot.zone")
@@ -102,27 +119,40 @@ def zone_system_block(
     """Quote-блок системы зоны (§1): первая строка + горящие гейты с дельтой и ISK.
 
     events — киллы «на гейтах» (D4) за последний час: {ts, kid, droppable, ship,
-    gate, solo, npc, att_ships, bomb, bubble}.
+    gate, solo, npc, att_ships, bomb, bubble, capsule}.
+
+    Капсулы (§0.13): счёт — корабли, капсулы припиской «(+N капсул)»; гейты, где были
+    только капсулы, для зоны не выводятся вообще — тогда и их капсулы в приписку шапки
+    не попадают (приписка шапки = сумма приписок показанных гейтов).
     """
     hour = [e for e in events if e["ts"] >= now_epoch - 3600.0]
-    total = len(hour)
-    isk = sum(e["droppable"] for e in hour)
-    lines = [f"{esc(name)} {total} {kills_word(total)} и {esc(format_isk(isk))} ISK на гейтах"]
     gates: dict[int, list[dict]] = {}
     for event in hour:
         gates.setdefault(event["gate"], []).append(event)
-    for gid, gate_events in sorted(gates.items(), key=lambda kv: -len(kv[1])):
+    rows: list[tuple[int, list[dict], int]] = []  # (гейт, все события гейта, капсул)
+    for gid, gate_events in gates.items():
+        ships, pods = split_pods(gate_events)
+        if ships:  # гейт с одними капсулами для зоны не информация (§0.13)
+            rows.append((gid, gate_events, pods))
+    ships_total = sum(ship_count(gate_events) for _, gate_events, _ in rows)
+    pods_total = sum(pods for _, _, pods in rows)
+    isk = sum(e["droppable"] for _, gate_events, _ in rows for e in gate_events)
+    counted = f"{ships_total} {kills_word(ships_total)}{capsules_note(pods_total)}"
+    lines = [f"{esc(name)} {counted} и {esc(format_isk(isk))} ISK на гейтах"]
+    for gid, gate_events, _ in sorted(rows, key=lambda row: -ship_count(row[1])):
         label = gate_labels.get(gid) or f"гейт {gid}"
-        line = f"на {esc(label)}: {len(gate_events)} за час"
-        delta = sum(1 for e in gate_events if e["ts"] >= now_epoch - WINDOW_DELTA)
-        if delta:
-            line += f" (+{delta} за последние 10 минут)"
-        line += f", droppable {esc(format_isk(sum(e['droppable'] for e in gate_events)))}"
         lines.append("")
-        lines.append(line)
-        attack = attack_text(gate_events, ship_names, include_attack)
-        if attack:
-            lines.append(esc(attack))
+        lines.extend(
+            gate_lines(
+                gate_events,
+                gid,
+                now_epoch,
+                label,
+                ship_names,
+                include_attack=include_attack,
+                include_isk=True,
+            )
+        )
     return quote("\n".join(lines))
 
 
@@ -158,9 +188,13 @@ class ZoneWatch:
                 events.popleft()
 
     def counts(self, sid: str, now_epoch: float) -> tuple[int, float]:
-        """(киллов на гейтах за час, droppable ISK за час) — триггеры D5 v2 (§0.7)."""
+        """(киллов КОРАБЛЕЙ на гейтах за час, droppable ISK за час) — триггеры D5 (§0.13).
+
+        Капсулы в счётчик не входят (это не бой), а их droppable уже обнулён — импланты
+        подобрать нельзя, поэтому ISK-сумма капсул не содержит.
+        """
         events = [e for e in self.events.get(sid, ()) if e["ts"] >= now_epoch - 3600.0]
-        return len(events), sum(e["droppable"] for e in events)
+        return ship_count(events), sum(e["droppable"] for e in events)
 
 
 class ZoneMonitor:
@@ -270,7 +304,11 @@ class ZoneMonitor:
 
 
     async def status(self, chat_id: int) -> str:
-        """Статус зоны из накопленных событий (§3): заголовок + блоки + чисто + футер."""
+        """Статус зоны из накопленных событий (§3): заголовок + блоки + чисто + футер.
+
+        Капсулы (§0.13): система «горит» только если есть киллы кораблей; система с одними
+        капсулами идёт в «✅ Чисто», сортировка блоков — по числу кораблей.
+        """
         watch = self.watches.get(chat_id)
         if watch is None:
             return (
@@ -283,11 +321,12 @@ class ZoneMonitor:
         ship_ids: set[int] = set()
         for sid in watch.systems:
             hour = [e for e in watch.events.get(sid, ()) if e["ts"] >= now_epoch - 3600.0]
-            if not hour:
+            ships, _ = split_pods(hour)
+            if not ships:
                 clean += 1
                 continue
             ship_ids.update(tid for e in hour for tid in e["att_ships"])
-            blocks.append((len(hour), sid))
+            blocks.append((len(ships), sid))
         if not blocks:
             head = bold("Сейчас гайки в зоне не кемпят.")
         elif len(blocks) == 1:
@@ -331,8 +370,9 @@ class ZoneMonitor:
                 for kill in gate_kills
                 if kill_epoch(kill) >= now_epoch - 3600.0
             ]
-            if hour:
-                blocks.append((len(hour), sid, hour))
+            ships, _ = split_pods(hour)
+            if ships:  # §0.13: система с одними капсулами для зоны «чистая»
+                blocks.append((len(ships), sid, hour))
             else:
                 clean += 1
             if self.request_gap:
@@ -441,6 +481,8 @@ class ZoneMonitor:
         triggered = hour_n >= watch.hour_threshold or isk_hour >= watch.isk
         last_ts = watch.last_alert_ts.get(sid, 0.0)
         hour_events = [e for e in watch.events[sid] if e["ts"] >= now_epoch - 3600.0]
+        # §0.13: «новым» считается и капсула — в часовом окне это новая активность
+        # (факт подбитой капсулы в алерте не показывается, но повторный пуш разрешает).
         has_new = any(e["ts"] > last_ts for e in hour_events)
         if not triggered or not has_new:
             return None

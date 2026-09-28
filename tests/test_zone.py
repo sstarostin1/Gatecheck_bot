@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import gatecheck_bot.zone as zone_module
+from gatecheck_bot.monitoring import CAPSULE_IDS
 from gatecheck_bot.routing import Graph
 from gatecheck_bot.zone import ZoneMonitor, build_zone_preset
 
@@ -21,6 +22,8 @@ def make_graph() -> Graph:
 
 
 HED = frozenset({"1", "2"})
+
+POD_ID, GOLD_POD_ID = sorted(CAPSULE_IDS)  # 670 — капсула, 33328 — Genolution 'Auroral'
 
 
 def kill(
@@ -107,7 +110,8 @@ def test_hour_trigger_fires_and_format_matches_spec() -> None:
     assert "на Alpha: 8 за час" in text
     assert "droppable 8.00M" in text
     assert "атака: соло · корабли: Rifter" in text
-    assert "Статистика за последний час. Запрос репорта по /zone_status" in text
+    assert "Статистика за последний час, без подбитых капсул" in text
+    assert "Запрос репорта по /zone_status" in text
     assert "Местное время -" in text and "ET" in text
     assert "zKillboard" not in text  # ссылки убраны (§0.8)
     assert "Причина" not in text  # только конкретика (§0.8)
@@ -148,6 +152,43 @@ def test_delta_shows_only_for_recent_kills() -> None:
     bot = FakeBot()
     run_ticks(monitor, bot)
     assert "на Alpha: 8 за час (+2 за последние 10 минут)" in bot.sent[0][1]
+
+
+def test_capsules_not_counted_as_kills_and_excluded_from_isk() -> None:
+    """§0.13: порог — корабли, капсулы припиской; droppable капсул (импланты) не считается."""
+    polls = {
+        # 7 кораблей по 1M + 5 капсул с «имплантами» по 0.3B — ни порог 8, ни ISK 0.5B.
+        "3": [kill(i, 603, droppable=1e6, ago=120 * i) for i in range(1, 8)]
+        + [kill(100 + i, 603, droppable=3e8, ship=POD_ID, ago=200 + i) for i in range(1, 6)],
+        "4": [],
+    }
+    monitor = make_monitor(polls)
+    start_zone(monitor)
+    bot = FakeBot()
+    run_ticks(monitor, bot)
+    assert bot.sent == []  # капсулы не дают ни счётчика, ни ISK-триггера
+    status = asyncio.run(monitor.status(7))
+    assert "Gamma 7 киллов (+5 капсул) и 7.00M ISK на гейтах" in status
+    assert "на Alpha: 7 за час (+5 капсул)" in status
+    assert "droppable 7.00M" in status  # 1.5B «имплантов» капсул в ISK не идут
+    asyncio.run(monitor.aclose())
+
+
+def test_capsule_only_gate_is_ignored_by_zone() -> None:
+    """§0.13: гейт/система, где за час были только капсулы, для зоны не существует."""
+    polls = {
+        "3": [kill(1, 603, ship=POD_ID, droppable=2e9, ago=300)],
+        "4": [kill(2, 604, ship=GOLD_POD_ID, droppable=3e8, ago=120)],
+    }
+    monitor = make_monitor(polls)
+    start_zone(monitor)
+    bot = FakeBot()
+    run_ticks(monitor, bot)
+    assert bot.sent == []  # импланты подобрать нельзя → ни счётчика, ни ISK, ни алерта
+    status = asyncio.run(monitor.status(7))
+    assert "Сейчас гайки в зоне не кемпят." in status
+    assert "✅ Чисто: 4/4 систем" in status
+    asyncio.run(monitor.aclose())
 
 
 def test_anti_spam_no_repeat_without_new_kills() -> None:
