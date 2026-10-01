@@ -1,4 +1,8 @@
-"""Тесты рендеринга v0.11: приписка капсул (§0.13) и футеры репортов (§0.4)."""
+"""Тесты рендеринга v0.11: приписка капсул (§0.13), футеры репортов (§0.4),
+HTML-ссылки (§0.11: markdown-форма выводится как есть — баг ≤ v0.11.0)."""
+
+import re
+from pathlib import Path
 
 from gatecheck_bot.render import (
     capsules_note,
@@ -6,6 +10,8 @@ from gatecheck_bot.render import (
     route_footer,
     zone_footer,
 )
+
+PACKAGE_DIR = Path(__file__).resolve().parent.parent / "gatecheck_bot"
 
 
 def test_capsules_word_pluralization() -> None:
@@ -34,3 +40,21 @@ def test_footers_mention_capsule_exclusion() -> None:
     assert "без подбитых капсул" in route
     assert "/route_stop" in route
     assert route.startswith("<i>") and route.endswith("</i>")
+
+
+def test_no_markdown_links_in_bot_sources() -> None:
+    """§0.11: в HTML parse mode `[текст](url)` печатается как есть — ссылки только <a href>."""
+    pattern = re.compile(r"\]\(https?://")
+    offenders = [
+        f"{path.name}:{i}"
+        for path in sorted(PACKAGE_DIR.glob("*.py"))
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if pattern.search(line)
+    ]
+    assert offenders == [], f"markdown-ссылки в текстах бота: {offenders}"
+
+
+def test_user_facing_links_are_html() -> None:
+    handlers = (PACKAGE_DIR / "handlers.py").read_text(encoding="utf-8")
+    assert '<a href="https://eve-gatecheck.space/">сервисом</a>' in handlers
+    assert '<a href="https://github.com/sstarostin1/Gatecheck_bot">' in handlers

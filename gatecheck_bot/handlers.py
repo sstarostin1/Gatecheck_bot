@@ -307,7 +307,8 @@ def build_router(
             f"Привет, {esc(name)}! 👋\n\n"
             f"Gatecheck Bot v{esc(__version__)} — слежение за гейт-кампами EVE Online "
             "для дальнобойщиков и сальважеров. Вдохновлен небезызвестным "
-            '[сервисом](https://eve-gatecheck.space/) и адаптирован под специфические нужды.\n\n'
+            '<a href="https://eve-gatecheck.space/">сервисом</a> и адаптирован под '
+            "специфические нужды.\n\n"
             "Основные команды:\n"
             "• /zone_on — включить мониторинг зоны «Hed + соседи» для сальважа (алерты по гейтам)\n"
             "• /zone_status — разовый отчёт по гейтам зоны сальважа\n"
@@ -337,7 +338,7 @@ def build_router(
             "Киллы — это подбитые корабли: капсулы идут припиской (+N капсул) и в счётчики/ISK "
             "не входят — их импланты не выпадают.\n"
             f"Версия: v{esc(__version__)}, "
-            '[Гитхаб-репозиторий](https://github.com/sstarostin1/Gatecheck_bot).',
+            '<a href="https://github.com/sstarostin1/Gatecheck_bot">Гитхаб-репозиторий</a>.',
             reply_markup=main_keyboard(),
             disable_web_page_preview=True,
         )
