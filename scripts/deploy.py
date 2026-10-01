@@ -199,6 +199,10 @@ class Deployer:
         remote_sha = self.local(["git", "rev-parse", f"origin/{BRANCH}"], check=False)
         if local_sha == remote_sha:
             self.ok(f"origin/{BRANCH} уже на {local_sha[:7]} — пушить нечего")
+        elif self.dry_run:
+            self.note(f"DRY-RUN: push не выполняю, было бы {remote_sha[:7]} → {local_sha[:7]}")
+            self.new_sha = local_sha
+            return
         elif self.args.no_push:
             self.note(f"push пропущен: локально {local_sha[:7]}, в origin {remote_sha[:7]}")
         else:
