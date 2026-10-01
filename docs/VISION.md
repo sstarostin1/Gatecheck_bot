@@ -221,6 +221,25 @@ Telegram-бот для пилотов EVE Online, которые зарабат�
 
 ## 12. Журнал версий
 
+- **1.7 (2026-09-29): v0.11.1 — HTML-ссылки, скрипт деплоя, бэклог.** Из фидбека: в `/start` и
+  `/help` markdown-ссылка `[сервисом](https://eve-gatecheck.space/)` печаталась «как есть»,
+  потому что бот работает в HTML parse mode → переведены на `<a href="…">…</a>`
+  (и в спека-примерах MESSAGES §9–§10); в §0.11 добавлено правило «ссылки — только HTML,
+  markdown не парсится», в `tests/test_render.py` — страж от возврата markdown-ссылок.
+  Добавлен **скрипт деплоя `scripts/deploy.py`** (+`deploy.bat` для cmd): preflight (ветка,
+  чистое дерево, доступность ssh/сервера) → ruff+pytest ДО выкатки → `git push` → на сервере
+  `git fetch --prune` + `git reset --hard origin/main` под юзером `gatecheck` (root ловит
+  dubious ownership) → `pip install` только при изменениях `requirements.txt` → `systemctl
+  restart gatecheck` → **обязательная верификация** (сервис active, строка `Gatecheck Bot vX
+  запущен как @…` с верзией = `__version__`, память < MemoryMax, ошибки после рестарта
+  в отчёт) → при провале команды отката либо авто-откат (`--rollback-on-fail`);
+  есть `--dry-run/--no-push/--no-tests/--force-restart/--strict-errors/--wait`, параметры
+  из env или `Host vps` ssh-config. Заведён `docs/BACKLOG.md`: B1 (маршрут показывает «чисто»
+  при тихих сбоях zK — `snapshot()`-ok игнорируется, `kills=[]` вместо ошибки; плюс гипотезы
+  о семантике locationID/лимите 200 киллов), B2 (пороги/кулдаун: «Хранилище недоступно»;
+  факт — прод жил на `4ef1f20`, хотфикс LazyStorage `04b02c2` не был выкачен), B3 (фича:
+  мгновенный ack ≤0.5 с + `edit_text` ответа для /route и /zone_on). Тесты 85 (новые
+  test_deploy.py и стражи ссылок), ruff чист.
 - **1.6 (2026-09-29): v0.11.0 — капсулы больше не считаются боем (спека MESSAGES §0.13, v1.2).**
   Две неочевидные ошибки статистики с прода: (1) droppable ISK включал `totalDroppableValue`
   подбитых капсул, а это импланты, которые подобрать со стороны нельзя; (2) капсула почти всегда
