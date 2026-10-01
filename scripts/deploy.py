@@ -223,17 +223,31 @@ class Deployer:
 
     def update_code(self) -> None:
         self.step(f"Обновление кода на сервере до {self.new_sha[:7]}")
-        self.remote_git("fetch --prune origin")
+        fetched = self.remote_git("fetch --prune origin", check=False)
+        if "insufficient permission" in fetched or "unable to create file" in fetched:
+            self.hint_permissions(fetched)
         head = self.remote_git("rev-parse origin/main").splitlines()[-1]
         if head != self.new_sha:
             self.die(f"Сервер видит origin/main = {head[:7]}, ожидался {self.new_sha[:7]}.")
-        self.remote_git("reset --hard origin/main")
+        reset = self.remote_git("reset --hard origin/main", check=False)
+        if "insufficient permission" in reset or "unable to create file" in reset:
+            self.hint_permissions(reset)
         current = self.remote_git("rev-parse HEAD").splitlines()[-1]
         if current != self.new_sha:
             self.die(f"После reset HEAD = {current[:7]}, ожидался {self.new_sha[:7]}.")
         self.ok(f"HEAD = {current[:7]}")
         changed = self.remote_git(f"diff --name-only {self.old_sha} {current}", check=False)
         self.update_deps(changed.splitlines())
+
+    def hint_permissions(self, output: str) -> None:
+        """Классические грабли VPS: git-операцию делали от root → файлы стали root-овыми."""
+        self.die(
+            "На сервере не хватает прав на файлы репозитория (обычно после git-операций от root):\n"
+            f"{output}\n"
+            "Лечится один раз (от root):\n"
+            f"    ssh {self.target} \"chown -R {self.run_as}:{self.run_as} {self.path}\"\n"
+            "подробнее — deploy/README.md, раздел «Грабли VPS»."
+        )
 
     def update_deps(self, changed: list[str]) -> None:
         venv_python = f"{self.path}/.venv/bin/python"

@@ -90,6 +90,19 @@ ssh vps "cd /opt/gatecheck && runuser -u gatecheck -- .venv/bin/python scripts/f
 
 После этого релиз = `git push` — тесты и выкатка происходят сами, в течение ~1 мин.
 
+## Грабли VPS
+
+- **Не делайте git-операции на сервере от `root`** (`git pull`, `reset`): новые файлы и объекты
+  остаются root-овыми, и потом `gatecheck` не может ни обновить репозиторий
+  (`error: insufficient permission for adding an object to repository database .git/objects`),
+  ни перезаписать файлы при `git reset`. Диагностика:
+  `ssh vps "find /opt/gatecheck -user root | wc -l"` (должно быть 0).
+  Лечение (один раз, от root): `ssh vps "chown -R gatecheck:gatecheck /opt/gatecheck"`.
+  Именно этот случай случился 19.09.2026 (деплой v0.10.0 от root → 135 root-файлов) и был
+  выявлен скриптом деплоя; исправлено 01.10.2026.
+- Скрипт `scripts/deploy.py` сам выполняет git от юзера `gatecheck` (через `runuser`) и при
+  ошибке прав печатает готовую команду лечения.
+
 ## Тонкости слабого VPS
 
 - лимит памяти в юните (MemoryMax=400M) — при OOM systemd перезапустит; состояние переживает
