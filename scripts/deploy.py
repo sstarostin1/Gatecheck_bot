@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -98,6 +99,13 @@ class Deployer:
         self.old_sha = ""
         self.new_sha = ""
         self.journal_errors: list[str] = []
+        # Мультиплексирование: одно TCP-соединение на весь деплой. Нужно потому, что
+        # провайдер/сеть режет новые подключения к 22 порту после серии из ~5 штук
+        # (проверено 01.10.2026: preflight проходил, а дальнейшие шаги — уже нет).
+        self.mux_path = (
+            Path(tempfile.gettempdir()) / f"gatecheck-deploy-{os.getpid()}.sock"
+        ).as_posix()
+        self.mux_active = False
 
     # --- вывод -------------------------------------------------------------
 
@@ -138,15 +146,13 @@ class Deployer:
         output = ""
         for attempt in range(1, attempts + 1):
             result = subprocess.run(
-                [
-                    "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={connect_timeout}",
-                    "-o", "ServerAliveInterval=15", "-o", "TCPKeepAlive=yes",
-                    self.target, command,
-                ],
+                self.ssh_cmd(command, connect_timeout=connect_timeout),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout + 60, check=False,
             )
-            output = ((result.stdout or "") + (result.stderr or "")).strip()
+            output = self.clean_output(
+                ((result.stdout or "") + (result.stderr or "")).strip()
+            )
             if result.returncode != 255:
                 break
             if attempt < attempts:
@@ -165,6 +171,62 @@ class Deployer:
         if check and result.returncode != 0:
             self.die(f"ssh {self.target}: команда упала (код {result.returncode}):\n{output}")
         return output
+
+    def ssh_cmd(self, command: str, *, connect_timeout: int = 12) -> list[str]:
+        """Команда ssh; при активном мультиплексировании переиспользует мастер-соединение."""
+        options = [
+            "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={connect_timeout}",
+            "-o", "ServerAliveInterval=15", "-o", "TCPKeepAlive=yes",
+        ]
+        if self.mux_active:
+            options += ["-o", f"ControlPath={self.mux_path}"]
+        return [*options, self.target, command]
+
+    def clean_output(self, text: str) -> str:
+        """Убрать шум мультиплексирования Windows (`mux_client_request_session: send fds failed`)."""
+        if not self.mux_active:
+            return text
+        lines = [line for line in text.splitlines() if "mux_" not in line]
+        return "\n".join(lines).strip()
+
+    def open_mux(self) -> None:
+        """Поднять мастер-соединение: дальше весь деплой идёт через один TCP-канал."""
+        if self.args.no_multiplex:
+            self.note("мультиплексирование выключено (--no-multiplex)")
+            return
+        if shutil.which("ssh") is None:
+            return
+        command = [
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12",
+            "-o", "ServerAliveInterval=15", "-o", "TCPKeepAlive=yes",
+            "-o", "ControlMaster=yes", "-o", f"ControlPath={self.mux_path}",
+            "-o", "ControlPersist=180", "-fN", self.target,
+        ]
+        for attempt in range(1, 6):
+            result = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60, check=False,
+            )
+            if result.returncode == 0:
+                self.mux_active = True
+                self.ok(
+                    f"мультиплексирование включено (одно соединение на весь деплой): {self.mux_path}"
+                )
+                return
+            if attempt < 5:
+                time.sleep(2.5)
+        self.note("мастер-соединение не поднялось — работаю обычными подключениями ssh")
+
+    def close_mux(self) -> None:
+        """Закрыть мастер-соединение (best effort) и подчистить сокет."""
+        if not self.mux_active:
+            return
+        subprocess.run(
+            ["ssh", "-o", f"ControlPath={self.mux_path}", "-O", "exit", self.target],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        self.mux_active = False
+        Path(self.mux_path).unlink(missing_ok=True)
 
     @staticmethod
     def last_line(text: str) -> str:
@@ -354,23 +416,28 @@ class Deployer:
 
     def run(self) -> None:
         self.check_local_repo()
-        self.check_server()
-        self.run_local_checks()
-        self.push()
-        if not self.check_remote_lag():
-            return
-        if self.dry_run:
-            self.step(
-                f"DRY-RUN: дальше были бы fetch/reset до {self.new_sha[:7]}, pip при изменениях, "
-                f"restart {self.service} и верификация (версия v{self.version}, память, журнал)"
-            )
-            return
-        self.update_code()
-        self.restart()
-        self.verify()
-        if self.journal_errors and self.args.strict_errors:
-            raise SystemExit(f"{FAIL} В журнале есть ошибки (--strict-errors).")
-        print(f"\n{OK} Деплой v{self.version} на {self.target} завершён и проверен.")
+        self.open_mux()
+        try:
+            self.check_server()
+            self.run_local_checks()
+            self.push()
+            if not self.check_remote_lag():
+                return
+            if self.dry_run:
+                self.step(
+                    f"DRY-RUN: дальше были бы fetch/reset до {self.new_sha[:7]}, pip при "
+                    f"изменениях, restart {self.service} и верификация "
+                    f"(версия v{self.version}, память, журнал)"
+                )
+                return
+            self.update_code()
+            self.restart()
+            self.verify()
+            if self.journal_errors and self.args.strict_errors:
+                raise SystemExit(f"{FAIL} В журнале есть ошибки (--strict-errors).")
+            print(f"\n{OK} Деплой v{self.version} на {self.target} завершён и проверен.")
+        finally:
+            self.close_mux()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -382,6 +449,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-push", action="store_true", help="не пушить в origin")
     parser.add_argument("--no-tests", action="store_true", help="пропустить ruff+pytest")
     parser.add_argument("--allow-dirty", action="store_true", help="не требовать чистое дерево")
+    parser.add_argument(
+        "--no-multiplex",
+        action="store_true",
+        help="выключить мультиплексирование ssh (одно соединение на весь деплой)",
+    )
     parser.add_argument(
         "--force-restart", action="store_true", help="рестарт, даже если код не менялся"
     )
