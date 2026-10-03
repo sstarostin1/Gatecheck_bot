@@ -126,18 +126,42 @@ class Deployer:
         return output
 
     def ssh(self, command: str, *, check: bool = True, timeout: int = 120) -> str:
-        result = subprocess.run(
-            [
-                "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
-                "-o", "ServerAliveInterval=15", self.target, command,
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout + 60, check=False,
-        )
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        """ssh с ретраями: соединение до слабого VPS иногда срывается (код 255)."""
+        attempts = 3
+        result: subprocess.CompletedProcess[str] | None = None
+        output = ""
+        for attempt in range(1, attempts + 1):
+            result = subprocess.run(
+                [
+                    "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
+                    "-o", "ServerAliveInterval=15", self.target, command,
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout + 60, check=False,
+            )
+            output = ((result.stdout or "") + (result.stderr or "")).strip()
+            if result.returncode != 255:
+                break
+            if attempt < attempts:
+                self.note(
+                    f"ssh: соединение сорвалось ({self.last_line(output)}), "
+                    f"повтор {attempt + 1}/{attempts}…"
+                )
+                time.sleep(3)
+        if result is None or result.returncode == 255:
+            self.die(
+                f"ssh {self.target}: не удалось соединиться трижды (код 255) — "
+                f"{self.last_line(output)}\n"
+                "Проверь сеть/VPN и повтори запуск: скрипт идемпотентен, повтор безопасен."
+            )
         if check and result.returncode != 0:
             self.die(f"ssh {self.target}: команда упала (код {result.returncode}):\n{output}")
         return output
+
+    @staticmethod
+    def last_line(text: str) -> str:
+        lines = [line for line in text.splitlines() if line.strip()]
+        return lines[-1][:120] if lines else "без вывода"
 
     def remote_git(self, args: str, *, check: bool = True) -> str:
         """git на сервере от владельца репозитория (у root иначе dubious ownership)."""
