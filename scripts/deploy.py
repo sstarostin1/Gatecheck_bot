@@ -183,10 +183,11 @@ class Deployer:
         return [*options, self.target, command]
 
     def clean_output(self, text: str) -> str:
-        """Убрать шум мультиплексирования Windows (`mux_client_request_session: send fds failed`)."""
+        """Убрать шум мультиплексирования Windows (`mux_…`, `mm_send_fd: sendmsg(2)…`)."""
         if not self.mux_active:
             return text
-        lines = [line for line in text.splitlines() if "mux_" not in line]
+        noise = ("mux_", "mm_send_fd", "sendmsg(2)")
+        lines = [line for line in text.splitlines() if not any(mark in line for mark in noise)]
         return "\n".join(lines).strip()
 
     def open_mux(self) -> None:
