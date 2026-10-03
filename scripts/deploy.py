@@ -133,15 +133,40 @@ class Deployer:
             self.die(f"Команда {' '.join(args)} упала (код {result.returncode}):\n{output}")
         return output
 
+    def channel_ok(self) -> bool:
+        """Живо ли мастер-соединение (быстрая проверка без нового TCP-подключения)."""
+        if not self.mux_active:
+            return True
+        result = subprocess.run(
+            ["ssh", "-o", f"ControlPath={self.mux_path}", "-O", "check", self.target],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        return result.returncode == 0
+
+    def reconnect(self, *, wait: bool = False) -> None:
+        """Переподнять мастер-соединение (сеть до VPS режет новые подключения «окнами»)."""
+        self.mux_active = False
+        Path(self.mux_path).unlink(missing_ok=True)
+        self.open_mux()
+        if self.mux_active or not wait:
+            return
+        pause = float(getattr(self.args, "retry_wait", 20.0))
+        self.note(f"канал недоступен — пауза {pause:g} с и ещё одна попытка поднять соединение…")
+        time.sleep(pause)
+        self.open_mux()
+
     def ssh(
         self, command: str, *, check: bool = True, timeout: int = 120,
         connect_timeout: int = 12, attempts: int = 6,
     ) -> str:
         """ssh с ретраями: сеть до VPS бывает флапающей (код 255 «connection timed out»).
 
-        Короткий ConnectTimeout + несколько попыток: каждый срыв стоит ~12 с, зато
-        выкатка проходит на нестабильном канале (проверено на транзитных обрывах к VPS).
+        Короткий ConnectTimeout + несколько попыток + переподключение мастер-соединения:
+        так выкатка проходит на нестабильном канале (проверено на транзитных обрывах к VPS).
         """
+        if self.mux_active and not self.channel_ok():
+            self.note("мастер-соединение потеряно — переподключаюсь…")
+            self.reconnect(wait=True)
         result: subprocess.CompletedProcess[str] | None = None
         output = ""
         for attempt in range(1, attempts + 1):
@@ -155,6 +180,8 @@ class Deployer:
             )
             if result.returncode != 255:
                 break
+            if self.mux_active:
+                self.reconnect()
             if attempt < attempts:
                 self.note(
                     f"ssh: соединение сорвалось ({self.last_line(output)}), "
@@ -466,6 +493,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--wait", type=float, default=6.0, help="пауза после рестарта, с (по умолчанию 6)"
+    )
+    parser.add_argument(
+        "--retry-wait", type=float, default=20.0,
+        help="пауза перед повторным поднятием ssh-канала, с (по умолчанию 20)",
     )
     return parser.parse_args(argv)
 
