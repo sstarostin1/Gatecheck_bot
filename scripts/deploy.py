@@ -125,16 +125,23 @@ class Deployer:
             self.die(f"Команда {' '.join(args)} упала (код {result.returncode}):\n{output}")
         return output
 
-    def ssh(self, command: str, *, check: bool = True, timeout: int = 120) -> str:
-        """ssh с ретраями: соединение до слабого VPS иногда срывается (код 255)."""
-        attempts = 3
+    def ssh(
+        self, command: str, *, check: bool = True, timeout: int = 120,
+        connect_timeout: int = 12, attempts: int = 6,
+    ) -> str:
+        """ssh с ретраями: сеть до VPS бывает флапающей (код 255 «connection timed out»).
+
+        Короткий ConnectTimeout + несколько попыток: каждый срыв стоит ~12 с, зато
+        выкатка проходит на нестабильном канале (проверено на транзитных обрывах к VPS).
+        """
         result: subprocess.CompletedProcess[str] | None = None
         output = ""
         for attempt in range(1, attempts + 1):
             result = subprocess.run(
                 [
-                    "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
-                    "-o", "ServerAliveInterval=15", self.target, command,
+                    "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={connect_timeout}",
+                    "-o", "ServerAliveInterval=15", "-o", "TCPKeepAlive=yes",
+                    self.target, command,
                 ],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=timeout + 60, check=False,
@@ -147,12 +154,13 @@ class Deployer:
                     f"ssh: соединение сорвалось ({self.last_line(output)}), "
                     f"повтор {attempt + 1}/{attempts}…"
                 )
-                time.sleep(3)
+                time.sleep(2.5)
         if result is None or result.returncode == 255:
             self.die(
-                f"ssh {self.target}: не удалось соединиться трижды (код 255) — "
+                f"ssh {self.target}: соединение не поднялось за {attempts} попыток — "
                 f"{self.last_line(output)}\n"
-                "Проверь сеть/VPN и повтори запуск: скрипт идемпотентен, повтор безопасен."
+                "Сеть до VPS нестабильна или закрыта: проверь подключение/VPN и повтори запуск "
+                "— скрипт идемпотентен, повтор безопасен."
             )
         if check and result.returncode != 0:
             self.die(f"ssh {self.target}: команда упала (код {result.returncode}):\n{output}")
