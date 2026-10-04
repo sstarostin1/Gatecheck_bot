@@ -69,8 +69,12 @@ def parse_journal_version(journal: str) -> str | None:
 
 
 def parse_prop(props: str, name: str) -> int:
-    """Числовое поле из вывода `systemctl show -p …` (0, если поля нет)."""
-    match = re.search(rf"^{name}=(\d+)$", props, re.MULTILINE)
+    """Числовое поле из вывода `systemctl show -p …` (0, если поля нет).
+
+    Значения могут разделяться переводами строк (как отдаёт systemctl) или пробелами
+    (после `tr '\\n' ' '` в пакетном удалённом сценарии).
+    """
+    match = re.search(rf"(?:^|\s){re.escape(name)}=(\d+)(?=\s|$)", props)
     return int(match.group(1)) if match else 0
 
 

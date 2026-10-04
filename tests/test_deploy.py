@@ -46,6 +46,10 @@ def test_parse_prop_reads_systemctl_values() -> None:
     assert deploy.parse_prop(props, "MemoryCurrent") == 227041280
     assert deploy.parse_prop(props, "MemoryMax") == 419430400
     assert deploy.parse_prop(props, "MemoryPeak") == 0
+    # Пакетный сценарий отдаёт свойства одной строкой (после tr '\n' ' ').
+    joined = "MemoryCurrent=227041280 MemoryMax=419430400 NRestarts=3"
+    assert deploy.parse_prop(joined, "MemoryCurrent") == 227041280
+    assert deploy.parse_prop(joined, "NRestarts") == 3
 
 
 def test_dry_run_flag_parses() -> None:
