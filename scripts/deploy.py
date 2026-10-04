@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -71,6 +72,16 @@ def parse_prop(props: str, name: str) -> int:
     """Числовое поле из вывода `systemctl show -p …` (0, если поля нет)."""
     match = re.search(rf"^{name}=(\d+)$", props, re.MULTILINE)
     return int(match.group(1)) if match else 0
+
+
+def parse_marks(output: str) -> dict[str, str]:
+    """Разобрать KEY=VALUE-маркеры из вывода удалённого сценария (строки в верхнем регистре)."""
+    marks: dict[str, str] = {}
+    for line in output.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.isupper() and key.replace("_", "").isalnum():
+            marks[key] = value.strip()
+    return marks
 
 
 def ssh_target(env: dict[str, str] | None = None) -> str:
@@ -263,8 +274,21 @@ class Deployer:
 
     def remote_git(self, args: str, *, check: bool = True) -> str:
         """git на сервере от владельца репозитория (у root иначе dubious ownership)."""
-        prefix = f"runuser -u {self.run_as} -- " if self.use_runuser else ""
-        return self.ssh(f"{prefix}git -C {self.path} {args}", check=check)
+        return self.ssh(f"{self.git_prefix()}git -C {self.path} {args}", check=check)
+
+    def git_prefix(self) -> str:
+        """`runuser -u gatecheck -- ` для git/питона на сервере (иначе чужие файлы)."""
+        return f"runuser -u {self.run_as} -- " if self.use_runuser else ""
+
+    def remote_script(self, script: str, *, check: bool = True, timeout: int = 240) -> dict[str, str]:
+        """Выполнить НЕСКОЛЬКО команд одним ssh-подключением (сеть режет поток подключений).
+
+        Сценарий печатает маркеры KEY=VALUE, которые разбирает parse_marks.
+        """
+        output = self.ssh(f"bash -lc {shlex.quote(script)}", check=check, timeout=timeout)
+        marks = parse_marks(output)
+        marks["_raw"] = output  # сырой вывод (например, хвост журнала) для разбора вызывающим
+        return marks
 
     @property
     def dry_run(self) -> bool:
@@ -293,15 +317,24 @@ class Deployer:
         user_match = re.search(r"^user\s+(\S+)$", resolved, re.MULTILINE)
         self.ssh_user = user_match.group(1) if user_match else ""
         self.use_runuser = bool(self.run_as) and self.ssh_user == "root"
-        self.ssh("true")
-        self.ok(f"ssh работает (вход как {self.ssh_user or '?'})")
-        probe = self.ssh(f"test -d {self.path} && echo yes", check=False)
-        if not probe.endswith("yes"):
+        git = f"{self.git_prefix()}git -C {self.path} "
+        marks = self.remote_script(
+            "; ".join(
+                [
+                    f"[ -d {self.path} ] && echo DIR=yes || echo DIR=no",
+                    f"echo ACTIVE=$(systemctl is-active {self.service})",
+                    f"echo SHA=$({git}rev-parse HEAD 2>&1)",
+                    f"echo EMPTY=$({git}status --porcelain 2>&1 | wc -l)",
+                ]
+            )
+        )
+        if marks.get("DIR") != "yes":
             self.die(f"На сервере нет каталога {self.path} (см. deploy/README.md, чек-лист VPS).")
-        self.ok(f"репозиторий {self.path} на месте")
-        active = self.ssh(f"systemctl is-active {self.service}", check=False)
-        self.ok(f"сервис {self.service}: {active or 'нет ответа'}")
-        self.old_sha = self.remote_git("rev-parse HEAD").splitlines()[-1]
+        self.ok(f"ssh работает (вход как {self.ssh_user or '?'}), репозиторий {self.path} на месте")
+        self.ok(f"сервис {self.service}: {marks.get('ACTIVE', 'нет ответа')}")
+        self.old_sha = marks.get("SHA", "").split()[-1] if marks.get("SHA") else ""
+        if len(self.old_sha) != 40:
+            self.hint_permissions(marks.get("SHA", "не удалось прочитать HEAD"))
         self.note(f"текущий коммит на проде: {self.old_sha[:7]}")
 
     def run_local_checks(self) -> None:
@@ -344,22 +377,47 @@ class Deployer:
 
 
     def update_code(self) -> None:
+        """Один ssh-заход: fetch + reset + (при изменении) pip. Сеть экономит подключения."""
         self.step(f"Обновление кода на сервере до {self.new_sha[:7]}")
-        fetched = self.remote_git("fetch --prune origin", check=False)
-        if "insufficient permission" in fetched or "unable to create file" in fetched:
-            self.hint_permissions(fetched)
-        head = self.remote_git("rev-parse origin/main").splitlines()[-1]
+        git = f"{self.git_prefix()}git -C {self.path} "
+        venv = f"{self.path}/.venv"
+        pip = f"{self.git_prefix()}{venv}/bin/pip"
+        marks = self.remote_script(
+            "; ".join(
+                [
+                    f"cd {self.path}",
+                    f"echo FETCH=$({git}fetch --prune origin 2>&1)",
+                    f"echo ORIGIN=$({git}rev-parse origin/main 2>&1)",
+                    f"echo RESET=$({git}reset --hard origin/main 2>&1)",
+                    f"echo HEAD=$({git}rev-parse HEAD 2>&1)",
+                    f"echo CHANGED=$({git}diff --name-only {self.old_sha} HEAD 2>&1 | tr '\\n' ' ')",
+                    (
+                        f"[ -x {venv}/bin/python ] || "
+                        f"{self.git_prefix()}python3 -m venv {venv}; echo VENV=ok"
+                    ),
+                    (
+                        f"if {git}diff --name-only {self.old_sha} HEAD | grep -q requirements.txt; "
+                        f"then {pip} install -q -r {self.path}/requirements.txt "
+                        "&& echo PIP=installed || echo PIP=failed; else echo PIP=skipped; fi"
+                    ),
+                ]
+            )
+        )
+        if "insufficient permission" in marks.get("FETCH", "") or "unable to create file" in (
+            marks.get("RESET", "")
+        ):
+            self.hint_permissions(f"{marks.get('FETCH', '')}\n{marks.get('RESET', '')}")
+        head = marks.get("HEAD", "").split()[-1]
         if head != self.new_sha:
-            self.die(f"Сервер видит origin/main = {head[:7]}, ожидался {self.new_sha[:7]}.")
-        reset = self.remote_git("reset --hard origin/main", check=False)
-        if "insufficient permission" in reset or "unable to create file" in reset:
-            self.hint_permissions(reset)
-        current = self.remote_git("rev-parse HEAD").splitlines()[-1]
-        if current != self.new_sha:
-            self.die(f"После reset HEAD = {current[:7]}, ожидался {self.new_sha[:7]}.")
-        self.ok(f"HEAD = {current[:7]}")
-        changed = self.remote_git(f"diff --name-only {self.old_sha} {current}", check=False)
-        self.update_deps(changed.splitlines())
+            self.die(
+                f"После reset HEAD = {head[:7] or '?'}, ожидался {self.new_sha[:7]}.\n"
+                f"fetch: {marks.get('FETCH', '')}\nreset: {marks.get('RESET', '')}"
+            )
+        self.ok(f"HEAD = {head[:7]}")
+        self.ok(f"изменённые файлы: {marks.get('CHANGED', '—') or '—'}")
+        if marks.get("PIP") == "failed":
+            self.die("Не удалось поставить зависимости (requirements.txt изменился).")
+        self.ok(f"зависимости: {marks.get('PIP', '?')}")
 
     def hint_permissions(self, output: str) -> None:
         """Классические грабли VPS: git-операцию делали от root → файлы стали root-овыми."""
@@ -371,22 +429,6 @@ class Deployer:
             "подробнее — deploy/README.md, раздел «Грабли VPS»."
         )
 
-    def update_deps(self, changed: list[str]) -> None:
-        venv_python = f"{self.path}/.venv/bin/python"
-        probe = self.ssh(f"test -x {venv_python} && echo yes", check=False)
-        if not probe.endswith("yes"):
-            self.step("В .venv нет интерпретатора — создаю окружение")
-            self.ssh(f"cd {self.path} && {self.runuser_prefix()}python3 -m venv .venv")
-            self.ok("окружение создано")
-        if "requirements.txt" not in changed:
-            self.ok("requirements.txt не менялся — pip не нужен")
-            return
-        self.step("Установка зависимостей (requirements.txt изменился)")
-        self.ssh(
-            f"cd {self.path} && {self.runuser_prefix()}.venv/bin/pip install -q -r requirements.txt"
-        )
-        self.ok("зависимости установлены")
-
     def restart(self) -> None:
         self.step(f"Рестарт сервиса {self.service}")
         self.ssh(f"systemctl restart {self.service}")
@@ -394,14 +436,24 @@ class Deployer:
         self.ok(f"пауза {self.args.wait:g} с после рестарта")
 
     def verify(self) -> None:
+        """Один ssh-заход: состояние сервиса + хвост журнала (экономим подключения)."""
         self.step("Верификация выкатки")
-        active = self.ssh(f"systemctl is-active {self.service}", check=False)
-        if active != "active":
-            self.report_failure(f"сервис {self.service} в состоянии «{active}»")
-        self.ok("сервис active")
-        props = self.ssh(
-            f"systemctl show -p MemoryCurrent -p MemoryMax -p NRestarts {self.service}", check=False
+        marks = self.remote_script(
+            "; ".join(
+                [
+                    f"echo ACTIVE=$(systemctl is-active {self.service})",
+                    f"echo PROPS=$(systemctl show -p MemoryCurrent -p MemoryMax -p NRestarts "
+                    f"{self.service} | tr '\\n' ' ')",
+                    f"systemctl is-active {self.service} >/dev/null "
+                    f"&& journalctl -u {self.service} --since '-3 min' --no-pager | tail -40",
+                ]
+            )
         )
+        active = marks.get("ACTIVE", "")
+        if active != "active":
+            self.report_failure(f"сервис {self.service} в состоянии «{active or 'нет ответа'}»")
+        self.ok("сервис active")
+        props = marks.get("PROPS", "")
         memory = parse_prop(props, "MemoryCurrent")
         limit = parse_prop(props, "MemoryMax")
         if memory and limit and limit > 0:
@@ -410,7 +462,7 @@ class Deployer:
                 self.report_failure(f"память на пределе: {line}")
             self.ok(line)
         self.note(f"рестартов с запуска сервиса: {parse_prop(props, 'NRestarts')}")
-        journal = self.ssh(f"journalctl -u {self.service} --since '-5 min' --no-pager", check=False)
+        journal = marks.get("_raw", "")
         found = parse_journal_version(journal)
         if found is None:
             self.report_failure("в журнале нет строки старта «Gatecheck Bot v…» — бот не поднялся")
@@ -422,9 +474,6 @@ class Deployer:
         ]
         for line in self.journal_errors[-5:]:
             self.note(f"ошибка в журнале: {line.strip()}")
-
-    def runuser_prefix(self) -> str:
-        return f"runuser -u {self.run_as} -- " if self.use_runuser else ""
 
 
     def report_failure(self, reason: str) -> None:
