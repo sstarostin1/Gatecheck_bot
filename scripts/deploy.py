@@ -442,10 +442,14 @@ class Deployer:
             "; ".join(
                 [
                     f"echo ACTIVE=$(systemctl is-active {self.service})",
-                    f"echo PROPS=$(systemctl show -p MemoryCurrent -p MemoryMax -p NRestarts "
-                    f"{self.service} | tr '\\n' ' ')",
-                    f"systemctl is-active {self.service} >/dev/null "
-                    f"&& journalctl -u {self.service} --since '-3 min' --no-pager | tail -40",
+                    (
+                        f"echo PROPS=$(systemctl show -p MemoryCurrent -p MemoryMax -p NRestarts "
+                        f"{self.service} | tr '\\n' ' ')"
+                    ),
+                    (
+                        f"systemctl is-active {self.service} >/dev/null "
+                        f"&& journalctl -u {self.service} --since '-3 min' --no-pager | tail -40"
+                    ),
                 ]
             )
         )
