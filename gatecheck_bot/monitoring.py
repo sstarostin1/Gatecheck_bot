@@ -102,13 +102,15 @@ def filter_gate_kills(kills: list[dict], gate_ids: set[int]) -> list[dict]:
 async def _zk_page(session: aiohttp.ClientSession, url: str) -> list[dict] | None:
     """Одна страница zK: 3 попытки с бэкоффом (B1/план шаг 1); сбой → None.
 
-    Ретраим 429/403 (лимиты zK) и 5xx; прочие HTTP-ошибки и исключения — тоже с бэкоффом.
+    Ретраим 429/403 (лимиты zK) и 5xx; также HTML-ответы (Cloudflare/рейт-лимит)
+    с HTTP 200 — это тоже ретрай. Прочие ошибки — бэкофф.
     """
     for attempt in range(3):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                ctype = resp.headers.get("Content-Type", "")
                 if resp.status in {429, 403, 500, 502, 503} and attempt < 2:
-                    delay = 2.0 * (attempt + 1)  # бэкофф: 2с, затем 4с
+                    delay = 2.0 * (attempt + 1)
                     logger.warning(
                         "zK: HTTP %s — пауза %.0fс, ретрай (%s)", resp.status, delay, url
                     )
@@ -117,8 +119,28 @@ async def _zk_page(session: aiohttp.ClientSession, url: str) -> list[dict] | Non
                 if resp.status != 200:
                     logger.warning("zK: HTTP %s: %s", resp.status, url)
                     return None
+                if "application/json" not in ctype:
+                    # zK вернул HTML (рейт-лимит/Cloudflare) вместо JSON — ретраим
+                    if attempt < 2:
+                        delay = 2.0 * (attempt + 1)
+                        logger.warning(
+                            "zK: не JSON (%s) — пауза %.0fс, ретрай (%s)", ctype, delay, url
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.warning("zK: не JSON (%s) после ретраев: %s", ctype, url)
+                    return None
                 data = await resp.json()
                 return data if isinstance(data, list) else None
+        except aiohttp.ContentTypeError as exc:
+            # aiohttp сам выбросил ContentTypeError — тоже ретрай (HTML вместо JSON)
+            if attempt < 2:
+                delay = 2.0 * (attempt + 1)
+                logger.warning("zK: ContentTypeError — пауза %.0fс, ретрай (%s)", delay, url)
+                await asyncio.sleep(delay)
+                continue
+            logger.warning("zK %s: ContentTypeError после ретраев: %s", url, exc)
+            return None
         except Exception as exc:
             if attempt < 2:
                 await asyncio.sleep(1.0 * (attempt + 1))
