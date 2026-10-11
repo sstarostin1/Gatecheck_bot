@@ -101,69 +101,85 @@ def filter_gate_kills(kills: list[dict], gate_ids: set[int]) -> list[dict]:
     return [k for k in kills if k.get("zkb", {}).get("locationID") in gate_ids]
 
 
-async def _zk_page(session: aiohttp.ClientSession, url: str, proxy: str | None = None) -> list[dict] | None:
-    """Одна страница zK: 3 попытки с бэкоффом (B1/план шаг 1); сбой → None.
+async def _zk_page(
+    session: aiohttp.ClientSession,
+    url: str,
+    proxy: str | None = None,
+    proxy_pool: ProxyPool | None = None,
+    proxy_index: int = 0,
+) -> tuple[list[dict] | None, int]:
+    """Одна страница zK: 3 попытки с бэкоффом; при ошибке прокси — пробуем следующий.
 
-    Ретраим 429/403 (лимиты zK) и 5xx; также HTML-ответы (Cloudflare/рейт-лимит)
-    с HTTP 200 — это тоже ретрай. Прочие ошибки — бэкофф.
-    Поддерживает proxy параметр для session.get().
+    Возвращает (data, next_proxy_index).
     """
-    for attempt in range(3):
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), proxy=proxy) as resp:
-                ctype = resp.headers.get("Content-Type", "")
-                if resp.status in {429, 403, 500, 502, 503} and attempt < 2:
-                    delay = 2.0 * (attempt + 1)
-                    logger.warning(
-                        "zK: HTTP %s — пауза %.0fс, ретрай (%s)", resp.status, delay, url
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                if resp.status != 200:
-                    logger.warning("zK: HTTP %s: %s", resp.status, url)
-                    return None
-                if "application/json" not in ctype:
-                    # zK вернул HTML (рейт-лимит/Cloudflare) вместо JSON — ретраим
-                    if attempt < 2:
+    max_proxy_attempts = 3 if proxy_pool is None else min(3, len(proxy_pool.pool))
+    
+    for proxy_attempt in range(max_proxy_attempts):
+        current_proxy = proxy
+        if proxy_pool is not None and proxy_pool.pool:
+            # Берём прокси по индексу (с вращением)
+            idx = (proxy_index + proxy_attempt) % len(proxy_pool.pool)
+            info = proxy_pool.pool[idx]
+            if info.kind != VLESS:
+                current_proxy = info.connector_url
+            else:
+                current_proxy = None
+        
+        for attempt in range(3):
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), proxy=current_proxy) as resp:
+                    ctype = resp.headers.get("Content-Type", "")
+                    if resp.status in {429, 403, 500, 502, 503} and attempt < 2:
                         delay = 2.0 * (attempt + 1)
                         logger.warning(
-                            "zK: не JSON (%s) — пауза %.0fс, ретрай (%s)", ctype, delay, url
+                            "zK: HTTP %s — пауза %.0fс, ретрай (%s)", resp.status, delay, url
                         )
                         await asyncio.sleep(delay)
                         continue
-                    logger.warning("zK: не JSON (%s) после ретраев: %s", ctype, url)
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, list) else None
-        except aiohttp.ContentTypeError as exc:
-            # aiohttp сам выбросил ContentTypeError — тоже ретрай (HTML вместо JSON)
-            if attempt < 2:
-                delay = 2.0 * (attempt + 1)
-                logger.warning("zK: ContentTypeError — пауза %.0fс, ретрай (%s)", delay, url)
-                await asyncio.sleep(delay)
-                continue
-            logger.warning("zK %s: ContentTypeError после ретраев: %s", url, exc)
-            return None
-        except aiohttp.ServerDisconnectedError as exc:
-            # Прокси разорвало соединение — ретраим
-            if attempt < 2:
-                delay = 2.0 * (attempt + 1)
-                logger.warning("zK: ServerDisconnectedError — пауза %.0fс, ретрай (%s)", delay, url)
-                await asyncio.sleep(delay)
-                continue
-            logger.warning("zK %s: ServerDisconnectedError после ретраев: %s", url, exc)
-            return None
-        except Exception as exc:
-            if attempt < 2:
-                await asyncio.sleep(1.0 * (attempt + 1))
-                continue
-            logger.warning("zK %s: %s: %s", url, type(exc).__name__, exc)
-            return None
-    return None
+                    if resp.status != 200:
+                        logger.warning("zK: HTTP %s: %s", resp.status, url)
+                        return None, proxy_index
+                    if "application/json" not in ctype:
+                        if attempt < 2:
+                            delay = 2.0 * (attempt + 1)
+                            logger.warning(
+                                "zK: не JSON (%s) — пауза %.0fс, ретрай (%s)", ctype, delay, url
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning("zK: не JSON (%s) после ретраев: %s", ctype, url)
+                        return None, proxy_index
+                    data = await resp.json()
+                    return (data if isinstance(data, list) else None), proxy_index
+            except aiohttp.ContentTypeError as exc:
+                if attempt < 2:
+                    delay = 2.0 * (attempt + 1)
+                    logger.warning("zK: ContentTypeError — пауза %.0fс, ретрай (%s)", delay, url)
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("zK %s: ContentTypeError после ретраев: %s", url, exc)
+                break  # Пробуем следующий прокси
+            except aiohttp.ServerDisconnectedError as exc:
+                if attempt < 2:
+                    delay = 2.0 * (attempt + 1)
+                    logger.warning("zK: ServerDisconnectedError — пауза %.0fс, ретрай (%s)", delay, url)
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("zK %s: ServerDisconnectedError после ретраев: %s", url, exc)
+                break  # Пробуем следующий прокси
+            except Exception as exc:
+                if attempt < 2:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                logger.warning("zK %s: %s: %s", url, type(exc).__name__, exc)
+                break  # Пробуем следующий прокси
+        # Если дошли сюда — все 3 попытки с текущим прокси неудачны, пробуем следующий прокси
+    return None, proxy_index
 
 
 async def fetch_system_kills(
-    session: aiohttp.ClientSession, system_id: str, past_seconds: int, proxy: str | None = None
+    session: aiohttp.ClientSession, system_id: str, past_seconds: int, proxy: str | None = None,
+    proxy_pool: ProxyPool | None = None
 ) -> list[dict] | None:
     """Киллы системы из zK за окно — ВСЕ страницы (H3: лимит 200/страницу).
 
@@ -175,9 +191,10 @@ async def fetch_system_kills(
     window = int(past_seconds)
     base = f"{ZK_BASE}/solarSystemID/{system_id}/pastSeconds/{window}"
     kills: list[dict] = []
+    proxy_index = 0
     for page in range(1, ZK_MAX_PAGES + 1):
         url = base if page == 1 else f"{base}/page/{page}/"
-        data = await _zk_page(session, url, proxy=proxy)
+        data, proxy_index = await _zk_page(session, url, proxy=proxy, proxy_pool=proxy_pool, proxy_index=proxy_index)
         if data is None:
             if page == 1:
                 return None
@@ -729,7 +746,7 @@ class RouteMonitor:
         """
         self.stat_requests += 1
         proxy = self._get_zk_proxy()
-        kills = await self.fetcher(self._session, sid, window, proxy=proxy)
+        kills = await self.fetcher(self._session, sid, window, proxy=proxy, proxy_pool=self.proxy_pool)
         if kills is None:
             self.stat_errors += 1
         return kills

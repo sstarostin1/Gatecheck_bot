@@ -270,7 +270,7 @@ class ZoneMonitor:
         """
         self.stat_requests += 1
         proxy = self._get_zk_proxy()
-        kills = await self.fetcher(self._session, sid, window, proxy=proxy)
+        kills = await self.fetcher(self._session, sid, window, proxy=proxy, proxy_pool=self.proxy_pool)
         if kills is None:
             self.stat_errors += 1
         return kills

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import gatecheck_bot.zone as zone_module
 from gatecheck_bot.monitoring import CAPSULE_IDS
 from gatecheck_bot.routing import Graph
+from gatecheck_bot.transport import ProxyPool
 from gatecheck_bot.zone import ZoneMonitor, build_zone_preset
 
 
@@ -57,7 +58,7 @@ GATE_LABELS = {600: "Beta", 601: "Alpha", 602: "Out", 603: "Alpha", 604: "Out"}
 
 
 def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> ZoneMonitor:
-    async def fetcher(session, sid, window, proxy: str | None = None):
+    async def fetcher(session, sid, window, proxy: str | None = None, proxy_pool: ProxyPool | None = None):
         val = polls.get(sid)
         return val if val is not None else []
 

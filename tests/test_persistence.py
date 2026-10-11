@@ -11,6 +11,7 @@ from test_zone import GATE_LABELS, GATE_NAMES, GATES, HED, FakeBot, make_graph, 
 from gatecheck_bot.monitoring import RouteMonitor
 from gatecheck_bot.routing import Graph
 from gatecheck_bot.storage import Storage
+from gatecheck_bot.transport import ProxyPool
 from gatecheck_bot.zone import ZoneMonitor
 
 
@@ -25,7 +26,7 @@ def make_route_graph() -> Graph:
 
 
 def make_zone(polls: dict[str, list[dict] | None], storage) -> ZoneMonitor:
-    async def fetcher(session, sid, window, proxy: str | None = None):
+    async def fetcher(session, sid, window, proxy: str | None = None, proxy_pool: ProxyPool | None = None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):
@@ -73,7 +74,7 @@ def test_route_seen_base_persisted(tmp_path) -> None:
     storage = Storage(tmp_path / "p.sqlite3")
     polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
 
-    async def fetcher(session, sid, window, proxy: str | None = None):
+    async def fetcher(session, sid, window, proxy: str | None = None, proxy_pool=None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):

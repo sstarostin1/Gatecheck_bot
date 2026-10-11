@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import gatecheck_bot.monitoring as monitoring_module
 from gatecheck_bot.monitoring import RouteMonitor, extract_features, route_verdict
 from gatecheck_bot.routing import Graph
+from gatecheck_bot.transport import ProxyPool
 
 
 def make_graph() -> Graph:
@@ -46,7 +47,7 @@ GATE_DEST = {500: "2", 501: "1", 502: "9", 503: "2"}
 
 
 def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> RouteMonitor:
-    async def fetcher(session, sid, window, proxy: str | None = None):
+    async def fetcher(session, sid, window, proxy: str | None = None, proxy_pool: ProxyPool | None = None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):
