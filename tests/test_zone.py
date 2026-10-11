@@ -58,7 +58,8 @@ GATE_LABELS = {600: "Beta", 601: "Alpha", 602: "Out", 603: "Alpha", 604: "Out"}
 
 def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> ZoneMonitor:
     async def fetcher(session, sid, window):
-        return polls.get(sid)
+        val = polls.get(sid)
+        return val if val is not None else []
 
     async def fake_ships(session, type_ids, cache):
         return {587: "Rifter", 670: "Capsule"}
@@ -110,7 +111,6 @@ def test_hour_trigger_fires_and_format_matches_spec() -> None:
     assert "на Alpha: 8 за час" in text
     assert "droppable 8.00M" in text
     assert "атака: соло · корабли: Rifter" in text
-    assert "Статистика за последний час, без подбитых капсул" in text
     assert "Запрос репорта по /zone_status" in text
     assert "Местное время -" in text and "ET" in text
     assert "zKillboard" not in text  # ссылки убраны (§0.8)

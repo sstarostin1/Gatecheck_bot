@@ -39,7 +39,9 @@ from .render import (
     capsules_note,
     esc,
     format_isk,
+    hours_phrase,
     kills_word,
+    partial_data_line,
     quote,
     route_footer,
 )
@@ -50,10 +52,14 @@ logger = logging.getLogger("gatecheck_bot.monitoring")
 ZK_BASE = "https://zkillboard.com/api"
 ESI = "https://esi.evetech.net/latest"
 ZK_UA = "GatecheckBot/0.10 (+https://github.com/sstarostin1/Gatecheck_bot)"
+ZK_PAGE_SIZE = 200       # zK отдаёт ≤200 киллов на страницу (лимит API)
+ZK_MAX_PAGES = 10        # safety-лимит пагинации: 2000 киллов на одно окно
 
 POLL_INTERVAL = 50.0     # период опроса маршрута, с (D-план: 40–60 с)
 TTL_SECONDS = 3600.0     # время жизни слежки, с (D6: 1 час)
-WINDOW_SECONDS = 3600.0  # окно статистики zK, с (§0.7: только «за последний час»)
+WINDOW_SECONDS = 3600.0  # окно часа: вердикт, дельты, алерты (§0.7: «за последний час»)
+ROUTE_HISTORY_SECONDS = 10800.0  # окно истории/опроса маршрутных систем, с (3 ч; v0.11.2:
+# расширено с 1 ч — потенциальные опасные точки маршрута видны шире, см. BACKLOG B1/H4)
 WINDOW_DELTA = 600.0     # скользящее окно дельты «за последние 10 минут» (§1)
 REQUEST_GAP = 0.3        # пауза между запросами к zK (этикет)
 SEEN_CAP = 20000         # потолок памяти дедупликации на слежку
@@ -93,30 +99,67 @@ def filter_gate_kills(kills: list[dict], gate_ids: set[int]) -> list[dict]:
     return [k for k in kills if k.get("zkb", {}).get("locationID") in gate_ids]
 
 
-async def fetch_system_kills(
-    session: aiohttp.ClientSession, system_id: str, past_seconds: int
-) -> list[dict] | None:
-    """Киллы системы из zK за окно (полные киллмейлы); 429/403 — ретрай; сбой → None."""
-    url = f"{ZK_BASE}/solarSystemID/{system_id}/pastSeconds/{past_seconds}/"
-    for attempt in range(2):
+async def _zk_page(session: aiohttp.ClientSession, url: str) -> list[dict] | None:
+    """Одна страница zK: 3 попытки с бэкоффом (B1/план шаг 1); сбой → None.
+
+    Ретраим 429/403 (лимиты zK) и 5xx; прочие HTTP-ошибки и исключения — тоже с бэкоффом.
+    """
+    for attempt in range(3):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status in {429, 403} and attempt == 0:
-                    logger.warning("zK %s: HTTP %s — пауза и ретрай", system_id, resp.status)
-                    await asyncio.sleep(2.0)
+                if resp.status in {429, 403, 500, 502, 503} and attempt < 2:
+                    delay = 2.0 * (attempt + 1)  # бэкофф: 2с, затем 4с
+                    logger.warning(
+                        "zK: HTTP %s — пауза %.0fс, ретрай (%s)", resp.status, delay, url
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 if resp.status != 200:
-                    logger.warning("zK %s: HTTP %s", system_id, resp.status)
+                    logger.warning("zK: HTTP %s: %s", resp.status, url)
                     return None
                 data = await resp.json()
                 return data if isinstance(data, list) else None
         except Exception as exc:
-            if attempt == 0:
-                await asyncio.sleep(1.0)
+            if attempt < 2:
+                await asyncio.sleep(1.0 * (attempt + 1))
                 continue
-            logger.warning("zK %s: %s: %s", system_id, type(exc).__name__, exc)
+            logger.warning("zK %s: %s: %s", url, type(exc).__name__, exc)
             return None
     return None
+
+
+async def fetch_system_kills(
+    session: aiohttp.ClientSession, system_id: str, past_seconds: int
+) -> list[dict] | None:
+    """Киллы системы из zK за окно — ВСЕ страницы (H3: лимит 200/страницу).
+
+    Сбой страницы 1 → None (система «не получена»); сбой последующей страницы →
+    частичные данные (новейшие киллы уже есть, старшие могут отсутствовать — лучше
+    они, чем ноль). Достигнут лимит ZK_MAX_PAGES → частичные данные + warning.
+    """
+    window = int(past_seconds)
+    base = f"{ZK_BASE}/solarSystemID/{system_id}/pastSeconds/{window}"
+    kills: list[dict] = []
+    for page in range(1, ZK_MAX_PAGES + 1):
+        url = base if page == 1 else f"{base}/page/{page}/"
+        data = await _zk_page(session, url)
+        if data is None:
+            if page == 1:
+                return None
+            logger.warning(
+                "zK %s: страница %s не получена — возвращаю частичные данные (%d киллов)",
+                system_id, page, len(kills),
+            )
+            return kills
+        kills.extend(k for k in data if isinstance(k, dict))
+        if len(data) < ZK_PAGE_SIZE:
+            break
+    else:
+        logger.warning(
+            "zK %s: лимит страниц (%d) достигнут — старшие киллы окна могут отсутствовать",
+            system_id, ZK_MAX_PAGES,
+        )
+    return kills
 
 
 async def resolve_ship_names(
@@ -261,13 +304,22 @@ def gate_lines(
     include_isk: bool = True,
     route_marker: bool = False,
     show_pod_only: bool = False,
+    history_window: float | None = None,
 ) -> list[str]:
     """Строки одного гейта (§1/§7): счёт за час, дельта за 10 мин, ISK, атака.
 
     Счёт — корабли, капсулы идут припиской «(+N капсул)» и в ISK не входят (§0.13).
     show_pod_only=False (зона): гейт без киллов кораблей не выводится вообще — для зоны
     капсулы не информация; show_pod_only=True (маршрут): выводится «только капсулы».
+    history_window (маршрут, v0.11.2): если за расширенное окно кораблей больше, чем за
+    час — добавляется динамика «· N киллов за 3 часа»; гейт, «чистый» за час, но с
+    киллами в истории, выводится строкой «за час без киллов · …» (вместо отсутствия).
     """
+    hist: list[dict] = []
+    if history_window is not None:
+        hist = [
+            e for e in events if e["ts"] >= now_epoch - history_window and e["gate"] == gate_id
+        ]
     hour = [
         e for e in events if e["ts"] >= now_epoch - WINDOW_SECONDS and e["gate"] == gate_id
     ]
@@ -275,8 +327,24 @@ def gate_lines(
     if not ships and not show_pod_only:
         return []
     marker = "🚩 " if route_marker else ""
+    hist_ships = len(split_pods(hist)[0]) if hist else 0
+    hist_label = (
+        f" · {hist_ships} {kills_word(hist_ships)} за {hours_phrase(history_window)}"
+        if history_window is not None and hist_ships > len(ships)
+        else ""
+    )
     if not ships:
-        line = f"{marker}на {esc(dest_label)}: только капсулы (+{pods} за час)"
+        if pods:
+            line = f"{marker}на {esc(dest_label)}: только капсулы (+{pods} за час){hist_label}"
+        elif hist_ships:
+            line = f"{marker}на {esc(dest_label)}: за час без киллов{hist_label}"
+        elif hist:  # старше часа были только капсулы
+            line = (
+                f"{marker}на {esc(dest_label)}: только капсулы "
+                f"за {hours_phrase(history_window)} (+{len(hist) - hist_ships})"
+            )
+        else:
+            return []
     else:
         delta = sum(1 for e in ships if e["ts"] >= now_epoch - WINDOW_DELTA)
         line = f"{marker}на {esc(dest_label)}: {len(ships)} за час{capsules_note(pods)}"
@@ -284,6 +352,7 @@ def gate_lines(
             line += f" (+{delta} за последние 10 минут)"
         if include_isk:
             line += f", droppable {format_isk(sum(e['droppable'] for e in ships))}"
+        line += hist_label
     lines = [line]
     attack = attack_text(hour, ship_names, include_attack)
     if attack:
@@ -307,6 +376,8 @@ class RouteWatch:
     events: dict[str, deque] = field(default_factory=dict)  # system_id -> deque[dict]
     seen: set[int] = field(default_factory=set)  # killmail_id уже учтённых киллов
     baselined: bool = False  # первый тик/опрос фиксирует базу без алертов
+    last_failed: list[str] = field(default_factory=list)  # системы, не полученные в последнем
+    # тике (B1: вместо молчаливого «чисто» показываем неполноту данных)
 
     def __post_init__(self) -> None:
         for sid in self.route:
@@ -316,14 +387,21 @@ class RouteWatch:
         return max(0, int((self.expires_at - time.monotonic()) / 60))
 
     def prune(self, now_epoch: float) -> None:
-        """Выбросить события старше окна часа (+ запас)."""
-        horizon = now_epoch - WINDOW_SECONDS - 60.0
+        """Выбросить события старше расширенного окна истории (+ запас)."""
+        horizon = now_epoch - ROUTE_HISTORY_SECONDS - 60.0
         for events in self.events.values():
             while events and events[0]["ts"] < horizon:
                 events.popleft()
 
     def hour_events(self, sid: str, now_epoch: float) -> list[dict]:
+        """События последнего часа — вердикт, дельты, триггеры (§0.7)."""
         return [e for e in self.events.get(sid, ()) if e["ts"] >= now_epoch - WINDOW_SECONDS]
+
+    def history_events(self, sid: str, now_epoch: float) -> list[dict]:
+        """События расширенного окна (3 ч, v0.11.2) — история для динамики в сообщениях."""
+        return [
+            e for e in self.events.get(sid, ()) if e["ts"] >= now_epoch - ROUTE_HISTORY_SECONDS
+        ]
 
     def ttl_line(self) -> str:
         first, last = self.names.get(self.route[0], "?"), self.names.get(self.route[-1], "?")
@@ -381,26 +459,34 @@ def route_system_block(
 
     Счёт — корабли, капсулы припиской (§0.13). Система/гейт, где были только капсулы,
     остаются в блоке: на маршруте это признак кемпа («только капсулы (+N за час)»).
+    v0.11.2: гейты группируются по расширенному окну (3 ч) — в строках видна динамика
+    «· N киллов за 3 часа»; счётчик в шапке и порядок (🚩 первыми, затем по киллам) —
+    по последнему часу, как и вердикт §6.
     """
-    events = watch.hour_events(sid, now_epoch)
+    history = watch.history_events(sid, now_epoch)
+    hour = [e for e in history if e["ts"] >= now_epoch - WINDOW_SECONDS]
     idx = watch.route.index(sid)
     neighbours = [
         watch.names[watch.route[j]] for j in (idx - 1, idx + 1) if 0 <= j < len(watch.route)
     ]
     between = esc(" и ".join(neighbours)) if neighbours else "—"
-    ships, pods = split_pods(events)
+    ships, pods = split_pods(hour)
     if ships:
         head = f" {len(ships)} {kills_word(len(ships))}{capsules_note(pods)} на гейтах"
     else:
         head = f" только капсулы (+{pods} за час)"
     lines = [bold(f"В {esc(watch.names[sid])} между {between}") + head]
     gates: dict[int, list[dict]] = {}
-    for event in events:
+    for event in history:
         gates.setdefault(event["gate"], []).append(event)
     route_gates = watch.route_gates.get(sid, set())
     ordered = sorted(
         gates.items(),
-        key=lambda kv: (kv[0] not in route_gates, -ship_count(kv[1])),  # 🚩 первыми (§7)
+        key=lambda kv: (
+            kv[0] not in route_gates,
+            # 🚩 первыми, затем по числу киллов ПОСЛЕДНЕГО ЧАСА (§7)
+            -ship_count([e for e in kv[1] if e["ts"] >= now_epoch - WINDOW_SECONDS]),
+        ),
     )
     for gid, gate_events in ordered:
         dest = watch.gate_names.get(gid, "")
@@ -417,9 +503,40 @@ def route_system_block(
                 include_isk=False,  # сумма выпавшего на маршруте не показывается (§7)
                 route_marker=gid in route_gates,
                 show_pod_only=True,  # на маршруте капсулы — информация (§0.13)
+                history_window=ROUTE_HISTORY_SECONDS,  # динамика «за 3 часа» (v0.11.2)
             )
         )
     return quote("\n".join(lines))
+
+
+def history_summary(watch: RouteWatch, now_epoch: float) -> str | None:
+    """Строка динамики (v0.11.2): киллы расширенного окна ВНЕ последнего часа.
+
+    Сценарий (решение пользователя, BACKLOG B1): кемпы были 1–3 ч назад, но последний
+    час чист — для спокойного вылета этого может хватить, но человек должен ВИДЕТЬ,
+    что было раньше. Счёт — корабли, капсулы припиской (§0.13).
+    """
+    parts: list[str] = []
+    for sid in watch.route:
+        hour_kids = {e["kid"] for e in watch.hour_events(sid, now_epoch)}
+        older = [
+            e for e in watch.history_events(sid, now_epoch) if e["kid"] not in hour_kids
+        ]
+        if not older:
+            continue
+        ships, pods = split_pods(older)
+        name = watch.names.get(sid, sid)
+        if ships:
+            parts.append(f"{name} — {len(ships)} {kills_word(len(ships))}{capsules_note(pods)}")
+        else:
+            parts.append(f"{name} — только капсулы (+{pods})")
+    if not parts:
+        return None
+    return (
+        f"🕒 Вне последнего часа (за {hours_phrase(ROUTE_HISTORY_SECONDS)}): "
+        + ", ".join(parts)
+        + "."
+    )
 
 
 class RouteMonitor:
@@ -429,7 +546,7 @@ class RouteMonitor:
         self,
         poll_interval: float = POLL_INTERVAL,
         ttl_seconds: float = TTL_SECONDS,
-        window_seconds: int = WINDOW_SECONDS,
+        window_seconds: float = ROUTE_HISTORY_SECONDS,
         request_gap: float = REQUEST_GAP,
         storage: Storage | None = None,
         fetcher: Fetcher | None = None,
@@ -546,6 +663,13 @@ class RouteMonitor:
             lines += ["", bold("Сейчас гайки кемпят на маршруте:"), ""]
             lines += [route_system_block(watch, sid, now_epoch, ship_names) for sid in burning]
             lines.append(f"✅ Чисто: {len(watch.route) - len(burning)}/{len(watch.route)} систем")
+        if watch.last_failed:  # B1: не молчим о неполных данных
+            lines.append(
+                partial_data_line(watch.names, watch.last_failed, len(watch.route))
+            )
+        history = history_summary(watch, now_epoch)  # динамика «за 3 часа» (v0.11.2)
+        if history:
+            lines.append(history)
         lines.append("")
         lines.append(route_footer())
         return "\n".join(lines)
@@ -599,20 +723,23 @@ class RouteMonitor:
 
 
     async def _tick_watch(self, watch: RouteWatch, bot=None, send: bool = True) -> bool:
-        """Опрос всех систем маршрута за час; алерты — только по 🚩-гейтам (§7).
+        """Опрос всех систем маршрута за расширенное окно; алерты — по свежим киллам (§7).
 
-        Возвращает True, если по всем системам данные получены (сбой zK → False).
+        Возвращает True, если по всем системам данные получены; сбойные системы
+        попадают в watch.last_failed — вместо молчаливого «чисто» показываем неполноту
+        (B1/шаг 1 плана). Алерт даёт только килл последнего часа (окно истории шире —
+        «старый» килл, пришедший с опозданием zK, не должен пушить «🚨 Кемп»).
         """
         self._ensure_session()
         now_epoch = datetime.now(UTC).timestamp()
         bomb_ids = await smartbomb_type_ids(self._session)
         was_baselined = watch.baselined
-        all_ok = True
+        failed: list[str] = []
         route_alert_sids: list[str] = []
         for sid in watch.route:
             kills = await self._fetch_kills(sid, self.window_seconds)
             if kills is None:
-                all_ok = False
+                failed.append(sid)
                 kills = []
             gate_kills = filter_gate_kills(kills, watch.gates_by_system.get(sid, set()))
             for kill in gate_kills:
@@ -625,6 +752,7 @@ class RouteMonitor:
                 # §0.13: капсула на 🚩-гейте — тоже килл (признак кемпа): не фильтруем её.
                 if (
                     was_baselined
+                    and feature["ts"] >= now_epoch - WINDOW_SECONDS
                     and feature["gate"] in watch.route_gates.get(sid, set())
                     and sid not in route_alert_sids
                 ):
@@ -645,6 +773,7 @@ class RouteMonitor:
             if self.request_gap:
                 await asyncio.sleep(self.request_gap)
         watch.baselined = True
+        watch.last_failed = failed  # B1: неполнота данных видна в status/старте
         if send and was_baselined and route_alert_sids and bot is not None:
             message = await self._alert_message(watch, route_alert_sids, now_epoch)
             try:
@@ -654,7 +783,7 @@ class RouteMonitor:
             if self.storage is not None:
                 for sid in route_alert_sids:
                     self.storage.log_alert(watch.chat_id, "route", sid, time.time())
-        return all_ok
+        return not failed
 
 
     async def _alert_message(

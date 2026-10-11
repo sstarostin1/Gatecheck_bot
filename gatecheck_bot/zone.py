@@ -53,6 +53,7 @@ from .render import (
     esc,
     italic,
     kills_word,
+    partial_data_line,
     quote,
     systems_word,
     zone_footer,
@@ -175,6 +176,8 @@ class ZoneWatch:
     last_alert: dict[str, float] = field(default_factory=dict)  # system_id -> monotonic
     last_alert_ts: dict[str, float] = field(default_factory=dict)  # system_id -> kill epoch:
     # ts последнего килла, уже попавшего в алерт; «новые» = ts больше этого значения
+    last_failed: list[str] = field(default_factory=list)  # системы, не полученные в последнем
+    # тике (B1: вместо молчаливого «чисто» показываем неполноту данных)
 
     def __post_init__(self) -> None:
         for sid in self.systems:
@@ -349,21 +352,33 @@ class ZoneMonitor:
             )
         total = len(watch.systems)
         lines.append(f"✅ Чисто: {clean}/{total} {systems_word(total)}")
+        if watch.last_failed:  # B1: последний опрос неполный — не молчим
+            lines.append(partial_data_line(watch.names, watch.last_failed, total))
         lines.append("")
         lines.append(zone_footer())
         return "\n".join(lines)
 
 
     async def live_snapshot(self, graph, gate_index, gate_names, gate_labels) -> str:
-        """Разовый опрос зоны без подписки (§4): формат §3 + подсказка /zone_on."""
+        """Разовый опрос зоны без подписки (§4): формат §3 + подсказка /zone_on.
+
+        B1: сбой опроса системы не считается «чистым» — показываем строку неполноты.
+        """
         self._ensure_session()
         systems = build_zone_preset(graph, self.hed_ids)
+        names = {sid: graph.name_of(sid) for sid in systems}
         now_epoch = datetime.now(UTC).timestamp()
         bomb_ids = await smartbomb_type_ids(self._session)
         blocks: list[tuple[int, str, list[dict]]] = []
         clean = 0
+        failed: list[str] = []
         for sid in systems:
-            kills = await self._fetch_kills(sid, 3600) or []
+            kills = await self._fetch_kills(sid, 3600)
+            if kills is None:
+                failed.append(sid)  # B1: не выдаём сбой за «чисто»
+                if self.request_gap:
+                    await asyncio.sleep(self.request_gap)
+                continue
             gate_kills = filter_gate_kills(kills, gate_index.get(sid, set()))
             hour = [
                 extract_features(kill, bomb_ids)
@@ -380,6 +395,8 @@ class ZoneMonitor:
         if not blocks:
             lines = [bold("Сейчас гайки в зоне не кемпят.")]
             lines.append(f"✅ Чисто: {clean} {systems_word(clean)}")
+            if failed:
+                lines.append(partial_data_line(names, failed, len(systems)))
             lines.append(italic("Постоянное слежение: /zone_on"))
             return "\n".join(lines)
         ship_ids: set[int] = set()
@@ -393,6 +410,8 @@ class ZoneMonitor:
                 zone_system_block(graph.name_of(sid), hour, now_epoch, gate_labels, ship_names)
             )
         lines.append(f"✅ Чисто: {clean}/{len(systems)} {systems_word(len(systems))}")
+        if failed:
+            lines.append(partial_data_line(names, failed, len(systems)))
         lines.append("")
         lines.append(zone_footer())
         lines.append(italic("Постоянное слежение: /zone_on"))
@@ -422,11 +441,13 @@ class ZoneMonitor:
             self.storage.prune_kill_events(now_epoch - 7 * 86400)
         blocks: list[tuple[int, str]] = []
         alerted_sids: list[str] = []
+        failed: list[str] = []
         for sid in watch.systems:
-            block = await self._tick_system(watch, sid, now_epoch)
+            block = await self._tick_system(watch, sid, now_epoch, failed)
             if block is not None:
                 blocks.append(block)
                 alerted_sids.append(sid)
+        watch.last_failed = failed  # B1: неполнота видна в /zone_status (и кнопке «Обновить»)
         if not blocks:
             return
         head = (
@@ -449,14 +470,18 @@ class ZoneMonitor:
                 self.storage.log_alert(watch.chat_id, "zone", sid, time.time())
 
     async def _tick_system(
-        self, watch: ZoneWatch, sid: str, now_epoch: float
+        self, watch: ZoneWatch, sid: str, now_epoch: float, failed: list[str]
     ) -> tuple[int, str] | None:
         """Опросить систему, обновить события; вернуть (киллов за час, блок) или None.
 
         Алерт только если: сработал часовой триггер D5 v2 (§0.7) И появились киллы,
         которых не было в предыдущем алерте (анти-спам §0.9) И cooldown прошёл (§0.10).
+        Сбой опроса (zK не ответил) — sid попадает в failed (B1), без событий/алерта.
         """
-        kills = await self._fetch_kills(sid, 3600) or []
+        kills = await self._fetch_kills(sid, 3600)
+        if kills is None:
+            failed.append(sid)  # B1: не выдаём сбой за отсутствие активности
+            return None
         gate_kills = filter_gate_kills(kills, watch.gates_by_system.get(sid, set()))
         bomb_ids = await smartbomb_type_ids(self._session)
         for kill in gate_kills:

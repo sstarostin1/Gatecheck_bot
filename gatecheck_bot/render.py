@@ -17,8 +17,10 @@ __all__ = [
     "code",
     "esc",
     "format_isk",
+    "hours_phrase",
     "italic",
     "kills_word",
+    "partial_data_line",
     "pre",
     "quote",
     "route_footer",
@@ -77,6 +79,27 @@ def systems_word(n: int) -> str:
     return "систем"
 
 
+def hours_phrase(seconds: float) -> str:
+    """Окно в часах человекочитаемо: 3600 → «1 час», 10800 → «3 часа», 18000 → «5 часов»."""
+    n = round(seconds / 3600)
+    if n % 10 == 1 and n % 100 != 11:
+        word = "час"
+    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        word = "часа"
+    else:
+        word = "часов"
+    return f"{n} {word}"
+
+
+def partial_data_line(names: dict[str, str], failed: list[str], total: int) -> str:
+    """Строка «данные неполны» (B1): системы, по которым zK не ответил в последнем тике."""
+    who = ", ".join(names.get(sid, sid) for sid in failed)
+    return (
+        f"⚠️ Данные не получены по {len(failed)} из {total} систем ({who}) — "
+        "отчёт может быть неполным."
+    )
+
+
 def bold(text: str) -> str:
     return f"<b>{text}</b>"
 
@@ -107,7 +130,6 @@ def eve_time() -> str:
 def zone_footer() -> str:
     """Footer всех зональных репортов (§0.4, курсив)."""
     return italic(
-        "Статистика за последний час, без подбитых капсул: их импланты не выпадают. "
         "Запрос репорта по /zone_status. "
         f"Местное время - {eve_time()} ET"
     )
@@ -116,7 +138,6 @@ def zone_footer() -> str:
 def route_footer() -> str:
     """Footer всех маршрутных сообщений (курсив)."""
     return italic(
-        "Статистика за последний час, без подбитых капсул: их импланты не выпадают. "
         "Остановить слежение: /route_stop. "
         f"Местное время - {eve_time()} ET"
     )

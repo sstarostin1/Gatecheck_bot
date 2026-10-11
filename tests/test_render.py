@@ -31,14 +31,21 @@ def test_capsules_note_is_empty_for_zero() -> None:
     assert capsules_note(12) == " (+12 капсул)"
 
 
-def test_footers_mention_capsule_exclusion() -> None:
+def test_footers_are_minimal() -> None:
+    """§0.4: футеры лаконичны — без строки про капсулы и «последний час»."""
     zone = zone_footer()
-    assert "без подбитых капсул" in zone
-    assert "их импланты не выпадают" in zone
+    assert "Запрос репорта по /zone_status" in zone
+    assert "Местное время -" in zone and zone.endswith("ET</i>")
+    assert "капсул" not in zone
+    assert "импланты" not in zone
+    assert "последний час" not in zone
     assert zone.startswith("<i>") and zone.endswith("</i>")
     route = route_footer()
-    assert "без подбитых капсул" in route
     assert "/route_stop" in route
+    assert "Местное время -" in route and route.endswith("ET</i>")
+    assert "капсул" not in route
+    assert "импланты" not in route
+    assert "последний час" not in route
     assert route.startswith("<i>") and route.endswith("</i>")
 
 

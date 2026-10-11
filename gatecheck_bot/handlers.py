@@ -19,8 +19,15 @@ from aiogram.types import CallbackQuery, Message
 
 from . import __version__
 from .config import BASE_DIR, Settings
-from .monitoring import RouteMonitor, format_isk, route_system_block, route_verdict, verdict_line
-from .render import bold, esc, italic, pre, route_footer, systems_word
+from .monitoring import (
+    RouteMonitor,
+    format_isk,
+    history_summary,
+    route_system_block,
+    route_verdict,
+    verdict_line,
+)
+from .render import bold, esc, italic, partial_data_line, pre, route_footer, systems_word
 from .routing import (
     Graph,
     build_name_index,
@@ -187,6 +194,11 @@ async def compose_route_start(
             lines.append("")
         clean = total - len(burning)
         lines.append(f"✅ Чисто: {clean}/{total} {systems_word(total)}")
+    if watch.last_failed:  # B1: первый опрос неполный — говорим прямо в старте
+        lines.append(partial_data_line(watch.names, watch.last_failed, total))
+    history = history_summary(watch, now_epoch)  # динамика «за 3 часа» (v0.11.2)
+    if history:
+        lines.append(history)
     lines += ["", route_footer()]
     return "\n".join(lines)
 
@@ -359,6 +371,10 @@ def build_router(
         uptime_min = int((time.monotonic() - PROCESS_STARTED_MONOTONIC) / 60)
         requests = monitor.stat_requests + zone_monitor.stat_requests
         errors = monitor.stat_errors + zone_monitor.stat_errors
+        # B1: сколько систем не ответило в последнем тике каждого монитора
+        last_tick_failed = sum(len(w.last_failed) for w in monitor.watches.values()) + sum(
+            len(w.last_failed) for w in zone_monitor.watches.values()
+        )
         db_state = "ок" if (storage is not None and storage.available) else "НЕДОСТУПЕН"
         db_tail = f" ({storage.error})" if (storage is not None and storage.error) else ""
         await message.answer(
@@ -368,6 +384,7 @@ def build_router(
             f"Слежки: зон {len(zone_monitor.watches)}, маршрутов {len(monitor.watches)}\n"
             f"Хранилище: {db_state}{esc(db_tail)}\n"
             f"zK: запросов {requests}, ошибок {errors}"
+            f"{f', систем без ответа в тике: {last_tick_failed}' if last_tick_failed else ''}"
         )
 
 

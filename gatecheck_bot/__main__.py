@@ -103,6 +103,7 @@ async def run_transport(
     label: str,
     monitor: RouteMonitor,
     zone_monitor: ZoneMonitor,
+    storage: LazyStorage,
 ) -> None:
     """Один «цикл жизни» сессии: get_me → polling под вотчдогом.
 
@@ -117,7 +118,7 @@ async def run_transport(
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
-    dp.include_router(build_router(settings, monitor, zone_monitor))
+    dp.include_router(build_router(settings, monitor, zone_monitor, storage))
     polling_task: asyncio.Task | None = None
     watchdog_task: asyncio.Task | None = None
     monitor_task: asyncio.Task | None = None
@@ -222,7 +223,7 @@ async def run(settings: Settings) -> None:
             logger.info("Транспорт №1: статичный прокси %s.", static_label)
             try:
                 await run_transport(
-                    settings, settings.proxy_url, static_label, monitor, zone_monitor
+                    settings, settings.proxy_url, static_label, monitor, zone_monitor, storage
                 )
                 return
             except NetworkDead:
@@ -231,7 +232,9 @@ async def run(settings: Settings) -> None:
         if await probe_direct():
             logger.info("Транспорт №2: прямое соединение.")
             try:
-                await run_transport(settings, None, "напрямую", monitor, zone_monitor)
+                await run_transport(
+                    settings, None, "напрямую", monitor, zone_monitor, storage
+                )
                 return
             except NetworkDead:
                 logger.error("Прямое соединение потеряно — включаю автономный прокси-пул.")
@@ -260,7 +263,7 @@ async def run(settings: Settings) -> None:
                     break
                 try:
                     await run_transport(
-                        settings, proxy.connector_url, proxy.label(), monitor, zone_monitor
+                        settings, proxy.connector_url, proxy.label(), monitor, zone_monitor, storage
                     )
                     return
                 except NetworkDead:
