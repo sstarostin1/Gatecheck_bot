@@ -203,6 +203,9 @@ async def run(settings: Settings) -> None:
             check_timeout=settings.proxy_check_timeout,
             xray=xray,
         )
+        # Запускаем сбор прокси в фоне — не блокируем старт бота.
+        # Пул будет использоваться мониторами для zK-запросов.
+        asyncio.create_task(pool.refresh())
 
     monitor = RouteMonitor(storage=storage, proxy_pool=pool)
     zone_monitor = ZoneMonitor(storage=storage, proxy_pool=pool)
