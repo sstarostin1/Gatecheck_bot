@@ -144,6 +144,15 @@ async def _zk_page(session: aiohttp.ClientSession, url: str, proxy: str | None =
                 continue
             logger.warning("zK %s: ContentTypeError после ретраев: %s", url, exc)
             return None
+        except aiohttp.ServerDisconnectedError as exc:
+            # Прокси разорвало соединение — ретраим
+            if attempt < 2:
+                delay = 2.0 * (attempt + 1)
+                logger.warning("zK: ServerDisconnectedError — пауза %.0fс, ретрай (%s)", delay, url)
+                await asyncio.sleep(delay)
+                continue
+            logger.warning("zK %s: ServerDisconnectedError после ретраев: %s", url, exc)
+            return None
         except Exception as exc:
             if attempt < 2:
                 await asyncio.sleep(1.0 * (attempt + 1))
