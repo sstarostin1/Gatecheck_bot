@@ -25,7 +25,7 @@ def make_route_graph() -> Graph:
 
 
 def make_zone(polls: dict[str, list[dict] | None], storage) -> ZoneMonitor:
-    async def fetcher(session, sid, window):
+    async def fetcher(session, sid, window, proxy: str | None = None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):
@@ -73,14 +73,14 @@ def test_route_seen_base_persisted(tmp_path) -> None:
     storage = Storage(tmp_path / "p.sqlite3")
     polls: dict[str, list[dict] | None] = {"1": [], "2": [], "3": []}
 
-    async def fetcher(session, sid, window):
+    async def fetcher(session, sid, window, proxy: str | None = None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):
         return {}
 
     graph = make_route_graph()
-    first = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher)
+    first = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher, proxy_pool=None)
     first._resolve_ship_names = fake_ships  # type: ignore[method-assign]
     first.begin(9, ["1", "2", "3"], graph, ROUTE_GATES, ROUTE_GATE_NAMES, ROUTE_GATE_DEST)
     asyncio.run(first.snapshot(first.watches[9]))
@@ -97,7 +97,7 @@ def test_route_seen_base_persisted(tmp_path) -> None:
                   "att_ships": [587]},
     )
 
-    second = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher)
+    second = RouteMonitor(request_gap=0, storage=storage, fetcher=fetcher, proxy_pool=None)
     second._resolve_ship_names = fake_ships  # type: ignore[method-assign]
     assert second.restore(graph, ROUTE_GATES, ROUTE_GATE_NAMES, ROUTE_GATE_DEST) == 1
     watch = second.watches[9]

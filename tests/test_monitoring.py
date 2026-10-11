@@ -46,7 +46,7 @@ GATE_DEST = {500: "2", 501: "1", 502: "9", 503: "2"}
 
 
 def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> RouteMonitor:
-    async def fetcher(session, sid, window):
+    async def fetcher(session, sid, window, proxy: str | None = None):
         return polls.get(sid)
 
     async def fake_ships(session, type_ids, cache):

@@ -46,6 +46,8 @@ from .render import (
     route_footer,
 )
 from .storage import Storage
+from .transport import ProxyPool
+from .transport.proxy_types import VLESS
 
 logger = logging.getLogger("gatecheck_bot.monitoring")
 
@@ -99,15 +101,16 @@ def filter_gate_kills(kills: list[dict], gate_ids: set[int]) -> list[dict]:
     return [k for k in kills if k.get("zkb", {}).get("locationID") in gate_ids]
 
 
-async def _zk_page(session: aiohttp.ClientSession, url: str) -> list[dict] | None:
+async def _zk_page(session: aiohttp.ClientSession, url: str, proxy: str | None = None) -> list[dict] | None:
     """Одна страница zK: 3 попытки с бэкоффом (B1/план шаг 1); сбой → None.
 
     Ретраим 429/403 (лимиты zK) и 5xx; также HTML-ответы (Cloudflare/рейт-лимит)
     с HTTP 200 — это тоже ретрай. Прочие ошибки — бэкофф.
+    Поддерживает proxy параметр для session.get().
     """
     for attempt in range(3):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), proxy=proxy) as resp:
                 ctype = resp.headers.get("Content-Type", "")
                 if resp.status in {429, 403, 500, 502, 503} and attempt < 2:
                     delay = 2.0 * (attempt + 1)
@@ -151,20 +154,21 @@ async def _zk_page(session: aiohttp.ClientSession, url: str) -> list[dict] | Non
 
 
 async def fetch_system_kills(
-    session: aiohttp.ClientSession, system_id: str, past_seconds: int
+    session: aiohttp.ClientSession, system_id: str, past_seconds: int, proxy: str | None = None
 ) -> list[dict] | None:
     """Киллы системы из zK за окно — ВСЕ страницы (H3: лимит 200/страницу).
 
     Сбой страницы 1 → None (система «не получена»); сбой последующей страницы →
     частичные данные (новейшие киллы уже есть, старшие могут отсутствовать — лучше
     они, чем ноль). Достигнут лимит ZK_MAX_PAGES → частичные данные + warning.
+    Поддерживает proxy для обхода блокировок zK.
     """
     window = int(past_seconds)
     base = f"{ZK_BASE}/solarSystemID/{system_id}/pastSeconds/{window}"
     kills: list[dict] = []
     for page in range(1, ZK_MAX_PAGES + 1):
         url = base if page == 1 else f"{base}/page/{page}/"
-        data = await _zk_page(session, url)
+        data = await _zk_page(session, url, proxy=proxy)
         if data is None:
             if page == 1:
                 return None
@@ -572,6 +576,7 @@ class RouteMonitor:
         request_gap: float = REQUEST_GAP,
         storage: Storage | None = None,
         fetcher: Fetcher | None = None,
+        proxy_pool: ProxyPool | None = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.ttl_seconds = ttl_seconds
@@ -579,6 +584,7 @@ class RouteMonitor:
         self.request_gap = request_gap
         self.fetcher = fetcher or fetch_system_kills
         self.storage = storage
+        self.proxy_pool = proxy_pool
         self.stat_requests = 0
         self.stat_errors = 0
         self.watches: dict[int, RouteWatch] = {}
@@ -589,6 +595,16 @@ class RouteMonitor:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
         return self._session
+
+    def _get_zk_proxy(self) -> str | None:
+        """Получить прокси для zK из пула (socks5/http, не VLESS)."""
+        if self.proxy_pool is None or not self.proxy_pool.pool:
+            return None
+        # Берём лучший доступный (пул уже отсортирован по приоритету/латентности)
+        for info in self.proxy_pool.pool:
+            if info.kind != VLESS:
+                return info.connector_url
+        return None
 
     async def _resolve_ship_names(self, type_ids: set[int]) -> dict[int, str]:
         return await resolve_ship_names(self._ensure_session(), type_ids, self._ship_names)
@@ -698,9 +714,13 @@ class RouteMonitor:
 
 
     async def _fetch_kills(self, sid: str, window: int) -> list[dict] | None:
-        """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping)."""
+        """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping).
+
+        Если есть прокси-пул — передаём прокси в fetcher (через proxy параметр session.get).
+        """
         self.stat_requests += 1
-        kills = await self.fetcher(self._session, sid, window)
+        proxy = self._get_zk_proxy()
+        kills = await self.fetcher(self._session, sid, window, proxy=proxy)
         if kills is None:
             self.stat_errors += 1
         return kills

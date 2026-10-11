@@ -57,7 +57,7 @@ GATE_LABELS = {600: "Beta", 601: "Alpha", 602: "Out", 603: "Alpha", 604: "Out"}
 
 
 def make_monitor(polls: dict[str, list[dict] | None], **kwargs) -> ZoneMonitor:
-    async def fetcher(session, sid, window):
+    async def fetcher(session, sid, window, proxy: str | None = None):
         val = polls.get(sid)
         return val if val is not None else []
 

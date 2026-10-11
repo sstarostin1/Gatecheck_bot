@@ -190,8 +190,9 @@ async def run(settings: Settings) -> None:
     # не оставляет бота без SQLite навсегда; /ping показывает статус.
     storage = LazyStorage(settings.db_path)
     storage.ensure(force=True)
-    monitor = RouteMonitor(storage=storage)  # живёт через ротации транспортов
-    zone_monitor = ZoneMonitor(storage=storage)
+
+    # ProxyPool для zK (обход Cloudflare) и Telegram — создаём ДО мониторов,
+    # чтобы мониторы могли использовать прокси для zK-запросов.
     pool: ProxyPool | None = None
     if settings.proxy_autopool:
         pool = ProxyPool(
@@ -202,6 +203,9 @@ async def run(settings: Settings) -> None:
             check_timeout=settings.proxy_check_timeout,
             xray=xray,
         )
+
+    monitor = RouteMonitor(storage=storage, proxy_pool=pool)
+    zone_monitor = ZoneMonitor(storage=storage, proxy_pool=pool)
 
     try:
         # Восстановить слежки из SQLite до подключения (рестарт-персистентность).

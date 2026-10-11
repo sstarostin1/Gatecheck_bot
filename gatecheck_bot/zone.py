@@ -59,6 +59,8 @@ from .render import (
     zone_footer,
 )
 from .storage import Storage
+from .transport import ProxyPool
+from .transport.proxy_types import VLESS
 
 logger = logging.getLogger("gatecheck_bot.zone")
 
@@ -213,6 +215,7 @@ class ZoneMonitor:
         hed_ids: frozenset[str] = HED_SYSTEM_IDS,
         storage: Storage | None = None,
         fetcher: Fetcher | None = None,
+        proxy_pool: ProxyPool | None = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.hour_threshold = hour_threshold
@@ -224,6 +227,7 @@ class ZoneMonitor:
         self.stat_requests = 0
         self.stat_errors = 0
         self.fetcher = fetcher or fetch_system_kills
+        self.proxy_pool = proxy_pool
         self.watches: dict[int, ZoneWatch] = {}
         self._session: aiohttp.ClientSession | None = None
         self._ship_names: dict[int, str] = {}
@@ -238,13 +242,35 @@ class ZoneMonitor:
             self._session = aiohttp.ClientSession(headers={"User-Agent": ZK_UA})
         return self._session
 
+    def _get_zk_proxy(self) -> str | None:
+        """Получить прокси для zK из пула (socks5/http, не VLESS)."""
+        if self.proxy_pool is None or not self.proxy_pool.pool:
+            return None
+        for info in self.proxy_pool.pool:
+            if info.kind != VLESS:
+                return info.connector_url
+        return None
+
+    def _get_zk_proxy(self) -> str | None:
+        """Получить прокси для zK из пула (socks5/http, не VLESS)."""
+        if self.proxy_pool is None or not self.proxy_pool.pool:
+            return None
+        for info in self.proxy_pool.pool:
+            if info.kind != VLESS:
+                return info.connector_url
+        return None
+
     async def _resolve_ship_names(self, type_ids: set[int]) -> dict[int, str]:
         return await resolve_ship_names(self._ensure_session(), type_ids, self._ship_names)
 
     async def _fetch_kills(self, sid: str, window: int) -> list[dict] | None:
-        """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping)."""
+        """Обёртка fetcher'а со счётчиками запросов/ошибок (для /ping).
+
+        Если есть прокси-пул — передаём прокси в fetcher (через proxy параметр session.get).
+        """
         self.stat_requests += 1
-        kills = await self.fetcher(self._session, sid, window)
+        proxy = self._get_zk_proxy()
+        kills = await self.fetcher(self._session, sid, window, proxy=proxy)
         if kills is None:
             self.stat_errors += 1
         return kills
