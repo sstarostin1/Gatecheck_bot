@@ -159,13 +159,9 @@ async def _zk_page(
                     continue
                 logger.warning("zK %s: ContentTypeError после ретраев: %s", url, exc)
                 break  # Пробуем следующий прокси
-            except aiohttp.ServerDisconnectedError as exc:
-                if attempt < 2:
-                    delay = 2.0 * (attempt + 1)
-                    logger.warning("zK: ServerDisconnectedError — пауза %.0fс, ретрай (%s)", delay, url)
-                    await asyncio.sleep(delay)
-                    continue
-                logger.warning("zK %s: ServerDisconnectedError после ретраев: %s", url, exc)
+            except aiohttp.ServerDisconnectedError:
+                # Прокси разорвало соединение — сразу пробуем следующий прокси, не ретраим это
+                logger.warning("zK: ServerDisconnectedError — пробуем следующий прокси (%s)", url)
                 break  # Пробуем следующий прокси
             except Exception as exc:
                 if attempt < 2:
